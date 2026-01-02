@@ -99,21 +99,46 @@ def normalize_phone(p: str) -> str:
 
 
 def upsert_number(phone_number: str):
+    """
+    1) Girilen numarayı normalize eder (kanonik: +90xxxxxxxxxx)
+    2) DB'de birebir eşleşme yoksa, mevcut kayıtları da normalize edip eşleştirmeye çalışır
+    3) Eşleşme bulursa o kaydı döndürür ve phone_number'ı kanonik formata günceller
+    4) Hiç yoksa yeni kayıt açar (kanonik formatla)
+    """
+    canonical = normalize_phone(phone_number)
+    if not canonical:
+        return None
+
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (phone_number,))
+    # 1) Birebir (kanonik) eşleşme
+    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
     row = cur.fetchone()
     if row:
         conn.close()
         return row
 
+    # 2) Eski kayıtlar arasında normalize ederek eşleşme ara
+    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers")
+    all_rows = cur.fetchall()
+
+    for r in all_rows:
+        rid, rphone, rcat, rlast = r
+        if normalize_phone(rphone) == canonical:
+            # Bulduk: bu kaydı kanonik hale getir (ileride tekrar ayrışmasın)
+            cur.execute("UPDATE numbers SET phone_number = ? WHERE id = ?", (canonical, rid))
+            conn.commit()
+            conn.close()
+            return (rid, canonical, rcat, rlast)
+
+    # 3) Yoksa yeni kayıt aç
     cur.execute(
         "INSERT INTO numbers (phone_number, category, last_reported_at) VALUES (?, ?, ?)",
-        (phone_number, "Bilinmiyor", None)
+        (canonical, "Bilinmiyor", None)
     )
     conn.commit()
-    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (phone_number,))
+    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
     row = cur.fetchone()
     conn.close()
     return row
@@ -376,4 +401,5 @@ with tab_admin:
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
+
 
