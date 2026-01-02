@@ -213,7 +213,7 @@ def upsert_number(phone_number: str):
     return row
 
 
-# -------------------- Auto category (A) --------------------
+# -------------------- Auto category (A) + Toast (D) --------------------
 def get_type_counts(number_id: int):
     conn = get_conn()
     cur = conn.cursor()
@@ -242,13 +242,18 @@ def decide_auto_category(counts: dict, total_reports: int) -> str:
 
 
 def auto_update_category(number_id: int):
-    # Mevcut kategori "Güvenli" ise otomatik bozma (manuel karar)
+    """
+    Kategori değişirse yeni kategoriyi döndürür, değişmezse None döndürür.
+    """
     row = get_number(number_id)
     if not row:
-        return
+        return None
+
     _, _, current_category, _ = row
+
+    # Mevcut kategori "Güvenli" ise otomatik bozma (manuel karar)
     if current_category == "Güvenli":
-        return
+        return None
 
     counts = get_type_counts(number_id)
     total_reports, _score = get_stats(number_id)
@@ -256,6 +261,9 @@ def auto_update_category(number_id: int):
 
     if new_cat != current_category:
         set_category(number_id, new_cat)
+        return new_cat
+
+    return None
 
 
 # -------------------- Admin list (C) --------------------
@@ -449,7 +457,7 @@ with tab_query:
                 st.success("Kategori güncellendi.")
             card_end()
 
-            # Şikayet ekle (B1 + A)
+            # Şikayet ekle (B1 + A + D)
             card_start()
             st.markdown("### 🚨 Şikayet ekle")
             rcol1, rcol2 = st.columns(2)
@@ -465,8 +473,12 @@ with tab_query:
                     st.warning("⚠️ Bu numara için son 24 saat içinde zaten şikayet eklenmiş.")
                 else:
                     add_report(_id, report_type, channel, message_excerpt)
-                    auto_update_category(_id)
-                    st.success("Şikayet kaydedildi. Skor ve kategori güncellendi.")
+                    new_cat = auto_update_category(_id)
+
+                    if new_cat:
+                        st.info(f"📌 Otomatik kategori güncellendi: **{new_cat}**")
+
+                    st.success("Şikayet kaydedildi. Skor güncellendi.")
             card_end()
 
             # Son şikayetler
