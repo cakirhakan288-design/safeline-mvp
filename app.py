@@ -213,7 +213,7 @@ def upsert_number(phone_number: str):
     return row
 
 
-# -------------------- Auto category (A) + Toast (D) --------------------
+# -------------------- Auto category (A) + Notification (D) --------------------
 def get_type_counts(number_id: int):
     conn = get_conn()
     cur = conn.cursor()
@@ -473,10 +473,10 @@ with tab_query:
                     st.warning("⚠️ Bu numara için son 24 saat içinde zaten şikayet eklenmiş.")
                 else:
                     add_report(_id, report_type, channel, message_excerpt)
-                    new_cat = auto_update_category(_id)
+                    new_cat2 = auto_update_category(_id)
 
-                    if new_cat:
-                        st.info(f"📌 Otomatik kategori güncellendi: **{new_cat}**")
+                    if new_cat2:
+                        st.info(f"📌 Otomatik kategori güncellendi: **{new_cat2}**")
 
                     st.success("Şikayet kaydedildi. Skor güncellendi.")
             card_end()
@@ -506,6 +506,27 @@ with tab_admin:
     limit = st.slider("Kaç kayıt gösterilsin?", min_value=10, max_value=200, value=50, step=10)
 
     rows = list_top_numbers(limit=limit, q=q.strip(), category=category_filter, sort_by=sort_by)
+
+    # -------------------- CSV Export (E) --------------------
+    # rows yapısında: (_id, phone, cat, last_ts, cnt)
+    csv_header = "id,phone_number,category,last_reported_at,reports_count,score,risk_label\n"
+    csv_lines = [csv_header]
+    for _id, phone, cat, last_ts, cnt in rows:
+        score = min(100, cnt * 15)
+        label = risk_label(score)
+        # CSV kaçış basit MVP: virgül içermeyen alanlar varsayımı (phone/cat/label güvenli)
+        last_ts_safe = (last_ts or "").replace(",", " ")
+        csv_lines.append(f"{_id},{phone},{cat},{last_ts_safe},{cnt},{score},{label}\n")
+    csv_data = "".join(csv_lines)
+
+    st.download_button(
+        label="⬇️ CSV indir (filtreli liste)",
+        data=csv_data.encode("utf-8"),
+        file_name="safeline_numbers.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+    # -------------------------------------------------------
 
     if not rows:
         st.info("Kriterlere uygun kayıt yok.")
