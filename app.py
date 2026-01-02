@@ -247,16 +247,46 @@ def has_recent_report(number_id: int, hours: int = 24) -> bool:
     conn.close()
     return cnt > 0
 
-def list_top_numbers(limit: int = 30):
+def list_top_numbers(limit: int = 50, q: str = "", category: str = "Hepsi", sort_by: str = "Şikayet (Azalan)"):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
+
+    where = []
+    params = []
+
+    if q:
+        where.append("n.phone_number LIKE ?")
+        params.append(f"%{q}%")
+
+    if category != "Hepsi":
+        where.append("n.category = ?")
+        params.append(category)
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    order_sql = """
+    ORDER BY reports_count DESC, n.last_reported_at DESC
+    """
+    if sort_by == "Son Şikayet (Yeni)":
+        order_sql = "ORDER BY n.last_reported_at DESC"
+    elif sort_by == "Son Şikayet (Eski)":
+        order_sql = "ORDER BY n.last_reported_at ASC"
+    elif sort_by == "Şikayet (Artan)":
+        order_sql = "ORDER BY reports_count ASC, n.last_reported_at DESC"
+    else:
+        order_sql = "ORDER BY reports_count DESC, n.last_reported_at DESC"
+
+    sql = f"""
         SELECT n.id, n.phone_number, n.category, n.last_reported_at,
                (SELECT COUNT(*) FROM reports r WHERE r.number_id = n.id) AS reports_count
         FROM numbers n
-        ORDER BY reports_count DESC, n.last_reported_at DESC
+        {where_sql}
+        {order_sql}
         LIMIT ?
-    """, (limit,))
+    """
+
+    params.append(limit)
+    cur.execute(sql, tuple(params))
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -487,6 +517,7 @@ with tab_admin:
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
+
 
 
 
