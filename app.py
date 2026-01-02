@@ -234,6 +234,18 @@ def get_reports(number_id: int, limit: int = 20):
     rows = cur.fetchall()
     conn.close()
     return rows
+def has_recent_report(number_id: int, hours: int = 24) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM reports
+        WHERE number_id = ?
+          AND datetime(created_at) >= datetime('now', ?)
+    """, (number_id, f'-{hours} hours'))
+    cnt = cur.fetchone()[0]
+    conn.close()
+    return cnt > 0
 
 def list_top_numbers(limit: int = 30):
     conn = get_conn()
@@ -407,9 +419,14 @@ with tab_query:
 
             message_excerpt = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: 'Bonus için linke tıkla...'")
 if st.button("Şikayeti Kaydet", type="primary"):
-    add_report(_id, report_type, channel, message_excerpt)
-    auto_update_category(_id)
-    st.success("Şikayet kaydedildi. Skor ve kategori güncellendi.")
+    # B1: aynı numaraya 24 saatte 1 şikayet
+    if has_recent_report(_id, hours=24):
+        st.warning("⚠️ Bu numara için son 24 saat içinde zaten şikayet eklenmiş.")
+    else:
+        add_report(_id, report_type, channel, message_excerpt)
+        auto_update_category(_id)
+        st.success("Şikayet kaydedildi. Skor ve kategori güncellendi.")
+
 
 card_end()
 
@@ -470,6 +487,7 @@ with tab_admin:
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
+
 
 
 
