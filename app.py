@@ -500,9 +500,17 @@ card_end()
 
 with tab_admin:
     st.markdown("### En çok şikayet alan numaralar")
-    rows = list_top_numbers(limit=50)
+
+    # Filtreler
+    q = st.text_input("Telefonla ara", placeholder="örn: 532 veya +90532")
+    category_filter = st.selectbox("Kategori filtresi", ["Hepsi"] + CATEGORIES)
+    sort_by = st.selectbox("Sıralama", ["Şikayet (Azalan)", "Şikayet (Artan)", "Son Şikayet (Yeni)", "Son Şikayet (Eski)"])
+    limit = st.slider("Kaç kayıt gösterilsin?", min_value=10, max_value=200, value=50, step=10)
+
+    rows = list_top_numbers(limit=limit, q=q.strip(), category=category_filter, sort_by=sort_by)
+
     if not rows:
-        st.info("Henüz kayıt yok.")
+        st.info("Kriterlere uygun kayıt yok.")
     else:
         for _id, phone, cat, last_ts, cnt in rows:
             score = min(100, cnt * 15)
@@ -512,11 +520,15 @@ with tab_admin:
                 badge_html(f"{score}/100 • {risk_label(score)}", risk_color(score)),
                 unsafe_allow_html=True
             )
-            st.markdown(f"<div class='subtle'>Kategori: <b>{cat}</b> • Şikayet: <b>{cnt}</b> • Son: <b>{last_ts or '-'}</b></div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='subtle'>Kategori: <b>{cat}</b> • Şikayet: <b>{cnt}</b> • Son: <b>{last_ts or '-'}</b></div>",
+                unsafe_allow_html=True
+            )
             if st.button(f"Bu numarayı aç → {phone}", key=f"open_{_id}"):
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
+
 
 
 
