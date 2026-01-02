@@ -42,7 +42,61 @@ def init_db():
     conn.close()
 
 def normalize_phone(p: str) -> str:
-    return (p or "").strip()
+    """
+    TR odaklı normalize:
+    - Tüm boşluk/()- gibi karakterleri siler
+    - 0 ile başlıyorsa +90 ekler
+    - 90 ile başlıyorsa + ekler
+    - +90 ile başlıyorsa aynen bırakır
+    - 10 haneli ise (5xx...) +90 ekler
+    """
+    if not p:
+        return ""
+
+    s = p.strip()
+    # sadece rakamları ve + işaretini tut
+    s2 = []
+    for ch in s:
+        if ch.isdigit() or ch == "+":
+            s2.append(ch)
+    s = "".join(s2)
+
+    # baştaki + haricindeki + ları temizle (garip kopyalamalar için)
+    if s.count("+") > 1:
+        s = "+" + s.replace("+", "")
+
+    # +90 ile
+    if s.startswith("+90"):
+        digits = s[1:]  # '90...'
+        digits = "".join([c for c in digits if c.isdigit()])
+        return "+" + digits
+
+    # 90 ile
+    if s.startswith("90"):
+        digits = "".join([c for c in s if c.isdigit()])
+        return "+" + digits
+
+    # 0 ile (0532...)
+    if s.startswith("0"):
+        digits = "".join([c for c in s if c.isdigit()])
+        # 0'ı at
+        digits = digits[1:]
+        # TR GSM 10 hane beklenir
+        if len(digits) == 10:
+            return "+90" + digits
+        return "+90" + digits  # MVP: uzun/kısa olsa da +90 ekleyip döndür
+
+    # 10 haneli direkt (532...)
+    digits = "".join([c for c in s if c.isdigit()])
+    if len(digits) == 10 and digits.startswith("5"):
+        return "+90" + digits
+
+    # fallback: + koymadan gelen farklı şeyler
+    if digits:
+        return "+" + digits if not s.startswith("+") else s
+
+    return ""
+
 
 def upsert_number(phone_number: str):
     conn = get_conn()
@@ -322,3 +376,4 @@ with tab_admin:
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
+
