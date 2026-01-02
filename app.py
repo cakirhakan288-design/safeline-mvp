@@ -13,6 +13,7 @@ CHANNELS = ["Arama", "SMS", "WhatsApp", "Diğer"]
 def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
+
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
@@ -41,14 +42,16 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 def normalize_phone(p: str) -> str:
     """
     TR odaklı normalize:
-    - Tüm boşluk/()- gibi karakterleri siler
+    - boşluk/()- gibi karakterleri temizler
     - 0 ile başlıyorsa +90 ekler
     - 90 ile başlıyorsa + ekler
     - +90 ile başlıyorsa aynen bırakır
-    - 10 haneli ise (5xx...) +90 ekler
+    - 10 haneli (5xx...) ise +90 ekler
+    Çıktı hedefi: +905xxxxxxxxx
     """
     if not p:
         return ""
@@ -61,14 +64,13 @@ def normalize_phone(p: str) -> str:
             s2.append(ch)
     s = "".join(s2)
 
-    # baştaki + haricindeki + ları temizle (garip kopyalamalar için)
+    # baştaki + haricindeki + ları temizle
     if s.count("+") > 1:
         s = "+" + s.replace("+", "")
 
     # +90 ile
     if s.startswith("+90"):
-        digits = s[1:]  # '90...'
-        digits = "".join([c for c in digits if c.isdigit()])
+        digits = "".join([c for c in s if c.isdigit()])
         return "+" + digits
 
     # 90 ile
@@ -79,81 +81,20 @@ def normalize_phone(p: str) -> str:
     # 0 ile (0532...)
     if s.startswith("0"):
         digits = "".join([c for c in s if c.isdigit()])
-        # 0'ı at
-        digits = digits[1:]
-        # TR GSM 10 hane beklenir
-        if len(digits) == 10:
-            return "+90" + digits
-        return "+90" + digits  # MVP: uzun/kısa olsa da +90 ekleyip döndür
+        digits = digits[1:]  # 0'ı at
+        return "+90" + digits
 
     # 10 haneli direkt (532...)
     digits = "".join([c for c in s if c.isdigit()])
     if len(digits) == 10 and digits.startswith("5"):
         return "+90" + digits
 
-    # fallback: + koymadan gelen farklı şeyler
+    # fallback
     if digits:
         return "+" + digits if not s.startswith("+") else s
 
     return ""
 
-
-def upsert_number(phone_number: str):
-    """
-    1) Girilen numarayı normalize eder (kanonik: +90xxxxxxxxxx)
-    2) DB'de birebir eşleşme yoksa, mevcut kayıtları da normalize edip eşleştirmeye çalışır
-    3) Eşleşme bulursa o kaydı döndürür ve phone_number'ı kanonik formata günceller
-    4) Hiç yoksa yeni kayıt açar (kanonik formatla)
-    """
-    canonical = normalize_phone(phone_number)
-    if not canonical:
-        return None
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    # 1) Birebir (kanonik) eşleşme
-    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
-    row = cur.fetchone()
-    if row:
-        conn.close()
-        return row
-
-    # 2) Eski kayıtlar arasında normalize ederek eşleşme ara
-    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers")
-    all_rows = cur.fetchall()
-
-    for r in all_rows:
-        rid, rphone, rcat, rlast = r
-        if normalize_phone(rphone) == canonical:
-            # Bulduk: bu kaydı kanonik hale getir (ileride tekrar ayrışmasın)
-            cur.execute("UPDATE numbers SET phone_number = ? WHERE id = ?", (canonical, rid))
-            conn.commit()
-            conn.close()
-            return (rid, canonical, rcat, rlast)
-
-    # 3) Yoksa yeni kayıt aç
-    cur.execute(
-        "INSERT INTO numbers (phone_number, category, last_reported_at) VALUES (?, ?, ?)",
-        (canonical, "Bilinmiyor", None)
-    )
-    conn.commit()
-    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-def add_report(number_id: int, report_type: str, channel: str, message_excerpt: str | None):
-    conn = get_conn()
-    cur = conn.cursor()
-    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    cur.execute(
-        "INSERT INTO reports (number_id, report_type, channel, message_excerpt, created_at) VALUES (?, ?, ?, ?, ?)",
-        (number_id, report_type, channel, message_excerpt or None, now)
-    )
-    cur.execute("UPDATE numbers SET last_reported_at = ? WHERE id = ?", (now, number_id))
-    conn.commit()
-    conn.close()
 
 def get_number(number_id: int):
     conn = get_conn()
@@ -162,6 +103,7 @@ def get_number(number_id: int):
     row = cur.fetchone()
     conn.close()
     return row
+
 
 def get_stats(number_id: int):
     conn = get_conn()
@@ -172,53 +114,13 @@ def get_stats(number_id: int):
     conn.close()
     return reports_count, score
 
+
 def set_category(number_id: int, category: str):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("UPDATE numbers SET category = ? WHERE id = ?", (category, number_id))
     conn.commit()
     conn.close()
-
-def get_type_counts(number_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT report_type, COUNT(*) 
-        FROM reports
-        WHERE number_id = ?
-        GROUP BY report_type
-    """, (number_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return {rt: cnt for rt, cnt in rows}
-
-def decide_auto_category(counts: dict, total_reports: int) -> str:
-    # Öncelik: Dolandırıcılık > Bahis > Şüpheli
-    if counts.get("Dolandırıcılık", 0) >= 2:
-        return "Dolandırıcılık"
-    if counts.get("Bahis", 0) >= 2:
-        return "Bahis"
-    if counts.get("Şüpheli", 0) >= 2:
-        return "Şüpheli"
-    if total_reports >= 3:
-        return "Şüpheli"
-    return "Bilinmiyor"
-
-def auto_update_category(number_id: int):
-    # mevcut kategori Güvenli ise otomatik bozma
-    row = get_number(number_id)
-    if not row:
-        return
-    _, _, current_category, _ = row
-    if current_category == "Güvenli":
-        return
-
-    counts = get_type_counts(number_id)
-    total, score = get_stats(number_id)  # total_reports burada
-    new_cat = decide_auto_category(counts, total)
-
-    if new_cat != current_category:
-        set_category(number_id, new_cat)
 
 
 def get_reports(number_id: int, limit: int = 20):
@@ -234,7 +136,25 @@ def get_reports(number_id: int, limit: int = 20):
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def add_report(number_id: int, report_type: str, channel: str, message_excerpt: str | None):
+    conn = get_conn()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    cur.execute(
+        "INSERT INTO reports (number_id, report_type, channel, message_excerpt, created_at) VALUES (?, ?, ?, ?, ?)",
+        (number_id, report_type, channel, message_excerpt or None, now)
+    )
+    cur.execute("UPDATE numbers SET last_reported_at = ? WHERE id = ?", (now, number_id))
+    conn.commit()
+    conn.close()
+
+
 def has_recent_report(number_id: int, hours: int = 24) -> bool:
+    """
+    B1: aynı numaraya son X saat içinde şikayet var mı?
+    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -247,6 +167,98 @@ def has_recent_report(number_id: int, hours: int = 24) -> bool:
     conn.close()
     return cnt > 0
 
+
+def upsert_number(phone_number: str):
+    """
+    1) girilen numarayı normalize eder (kanonik: +90xxxxxxxxxx)
+    2) DB'de birebir eşleşme yoksa, mevcut kayıtları da normalize edip eşleştirmeye çalışır
+    3) eşleşme bulursa o kaydı döndürür ve phone_number'ı kanonik formata günceller
+    4) hiç yoksa yeni kayıt açar (kanonik formatla)
+    """
+    canonical = normalize_phone(phone_number)
+    if not canonical:
+        return None
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # 1) birebir (kanonik) eşleşme
+    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
+    row = cur.fetchone()
+    if row:
+        conn.close()
+        return row
+
+    # 2) eski kayıtlar arasında normalize ederek eşleşme ara
+    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers")
+    all_rows = cur.fetchall()
+
+    for r in all_rows:
+        rid, rphone, rcat, rlast = r
+        if normalize_phone(rphone) == canonical:
+            cur.execute("UPDATE numbers SET phone_number = ? WHERE id = ?", (canonical, rid))
+            conn.commit()
+            conn.close()
+            return (rid, canonical, rcat, rlast)
+
+    # 3) yoksa yeni kayıt aç
+    cur.execute(
+        "INSERT INTO numbers (phone_number, category, last_reported_at) VALUES (?, ?, ?)",
+        (canonical, "Bilinmiyor", None)
+    )
+    conn.commit()
+    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+# -------------------- Auto category (A) --------------------
+def get_type_counts(number_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT report_type, COUNT(*)
+        FROM reports
+        WHERE number_id = ?
+        GROUP BY report_type
+    """, (number_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return {rt: cnt for rt, cnt in rows}
+
+
+def decide_auto_category(counts: dict, total_reports: int) -> str:
+    # Öncelik: Dolandırıcılık > Bahis > Şüpheli
+    if counts.get("Dolandırıcılık", 0) >= 2:
+        return "Dolandırıcılık"
+    if counts.get("Bahis", 0) >= 2:
+        return "Bahis"
+    if counts.get("Şüpheli", 0) >= 2:
+        return "Şüpheli"
+    if total_reports >= 3:
+        return "Şüpheli"
+    return "Bilinmiyor"
+
+
+def auto_update_category(number_id: int):
+    # Mevcut kategori "Güvenli" ise otomatik bozma (manuel karar)
+    row = get_number(number_id)
+    if not row:
+        return
+    _, _, current_category, _ = row
+    if current_category == "Güvenli":
+        return
+
+    counts = get_type_counts(number_id)
+    total_reports, _score = get_stats(number_id)
+    new_cat = decide_auto_category(counts, total_reports)
+
+    if new_cat != current_category:
+        set_category(number_id, new_cat)
+
+
+# -------------------- Admin list (C) --------------------
 def list_top_numbers(limit: int = 50, q: str = "", category: str = "Hepsi", sort_by: str = "Şikayet (Azalan)"):
     conn = get_conn()
     cur = conn.cursor()
@@ -264,9 +276,6 @@ def list_top_numbers(limit: int = 50, q: str = "", category: str = "Hepsi", sort
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
-    order_sql = """
-    ORDER BY reports_count DESC, n.last_reported_at DESC
-    """
     if sort_by == "Son Şikayet (Yeni)":
         order_sql = "ORDER BY n.last_reported_at DESC"
     elif sort_by == "Son Şikayet (Eski)":
@@ -300,12 +309,14 @@ def risk_label(score: int) -> str:
         return "Şüpheli"
     return "Düşük Risk"
 
+
 def risk_color(score: int) -> str:
     if score >= 61:
         return "#ef4444"  # red
     if score >= 31:
         return "#f59e0b"  # amber
     return "#22c55e"      # green
+
 
 def badge_html(text: str, bg: str) -> str:
     return f"""
@@ -322,8 +333,10 @@ def badge_html(text: str, bg: str) -> str:
     ">{text}</span>
     """
 
+
 def card_start():
     st.markdown("""<div class="card">""", unsafe_allow_html=True)
+
 
 def card_end():
     st.markdown("""</div>""", unsafe_allow_html=True)
@@ -334,7 +347,6 @@ st.set_page_config(page_title="SafeLine AI", page_icon="🛡️", layout="center
 
 st.markdown("""
 <style>
-/* Make it feel like a mobile app */
 .block-container { padding-top: 1.1rem; padding-bottom: 2.5rem; max-width: 720px; }
 h1 { font-size: 1.55rem !important; }
 h2, h3 { letter-spacing: -0.2px; }
@@ -345,12 +357,6 @@ h2, h3 { letter-spacing: -0.2px; }
   padding: 14px 14px 10px 14px;
   margin-bottom: 12px;
   background: rgba(255,255,255,0.03);
-}
-
-.big {
-  font-size: 2.0rem;
-  font-weight: 800;
-  margin: 0;
 }
 
 .subtle {
@@ -374,8 +380,6 @@ h2, h3 { letter-spacing: -0.2px; }
 .stTextArea textarea {
   border-radius: 14px;
 }
-
-small { opacity: 0.8; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -407,7 +411,8 @@ with tab_query:
             st.error("Lütfen bir numara gir.")
         else:
             row = upsert_number(phone)
-            st.session_state["current_number_id"] = row[0]
+            if row:
+                st.session_state["current_number_id"] = row[0]
     card_end()
 
     number_id = st.session_state.get("current_number_id")
@@ -425,11 +430,17 @@ with tab_query:
                 badge_html(f"{score}/100 • {risk_label(score)}", risk_color(score)),
                 unsafe_allow_html=True
             )
-            st.markdown(f"<div class='subtle' style='margin-top:10px'>Kategori: <b>{category}</b> • Şikayet: <b>{reports_count}</b></div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='subtle'>Son şikayet: <b>{last_reported_at or '-'}</b></div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='subtle' style='margin-top:10px'>Kategori: <b>{category}</b> • Şikayet: <b>{reports_count}</b></div>",
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f"<div class='subtle'>Son şikayet: <b>{last_reported_at or '-'}</b></div>",
+                unsafe_allow_html=True
+            )
             card_end()
 
-            # Category update
+            # Kategori güncelle (manuel)
             card_start()
             st.markdown("### Kategori güncelle")
             new_cat = st.selectbox("Kategori", CATEGORIES, index=CATEGORIES.index(category) if category in CATEGORIES else 4)
@@ -438,7 +449,7 @@ with tab_query:
                 st.success("Kategori güncellendi.")
             card_end()
 
-            # Add report
+            # Şikayet ekle (B1 + A)
             card_start()
             st.markdown("### 🚨 Şikayet ekle")
             rcol1, rcol2 = st.columns(2)
@@ -448,63 +459,38 @@ with tab_query:
                 channel = st.selectbox("Kanal", CHANNELS, index=0)
 
             message_excerpt = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: 'Bonus için linke tıkla...'")
-if st.button("Şikayeti Kaydet", type="primary"):
-    # B1: aynı numaraya 24 saatte 1 şikayet
-    if has_recent_report(_id, hours=24):
-        st.warning("⚠️ Bu numara için son 24 saat içinde zaten şikayet eklenmiş.")
-    else:
-        add_report(_id, report_type, channel, message_excerpt)
-        auto_update_category(_id)
-        st.success("Şikayet kaydedildi. Skor ve kategori güncellendi.")
 
+            if st.button("Şikayeti Kaydet", type="primary"):
+                if has_recent_report(_id, hours=24):
+                    st.warning("⚠️ Bu numara için son 24 saat içinde zaten şikayet eklenmiş.")
+                else:
+                    add_report(_id, report_type, channel, message_excerpt)
+                    auto_update_category(_id)
+                    st.success("Şikayet kaydedildi. Skor ve kategori güncellendi.")
+            card_end()
 
-card_end()
-
-
-# Latest reports
-if number_id:
-    row = get_number(number_id)
-    if row:
-        _id, phone_number, category, last_reported_at = row
-
-        reps = get_reports(_id, limit=15)
-
-        card_start()
-        st.markdown("### Son şikayetler")
-
-        if not reps:
-            st.info("Henüz şikayet yok.")
-        else:
-            for rt, ch, msg, ts in reps:
-                st.markdown(f"- **{rt}** / {ch}  \n  <small>{ts}</small>", unsafe_allow_html=True)
-                if msg:
-                    st.markdown(f"<div class='subtle'>{msg}</div>", unsafe_allow_html=True)
-
-        card_end()
-
-
-card_start()
-st.markdown("### Son şikayetler")
-reps = []
-
-if not reps:
-    st.info("Henüz şikayet yok.")
-else:
-    for rt, ch, msg, ts in reps:
-        st.markdown(f"- **{rt}** / {ch}  \n  <small>{ts}</small>", unsafe_allow_html=True)
-        if msg:
-            st.markdown(f"<div class='subtle'>{msg}</div>", unsafe_allow_html=True)
-
-card_end()
-
+            # Son şikayetler
+            reps = get_reports(_id, limit=15)
+            card_start()
+            st.markdown("### Son şikayetler")
+            if not reps:
+                st.info("Henüz şikayet yok.")
+            else:
+                for rt, ch, msg, ts in reps:
+                    st.markdown(f"- **{rt}** / {ch}  \n  <small>{ts}</small>", unsafe_allow_html=True)
+                    if msg:
+                        st.markdown(f"<div class='subtle'>{msg}</div>", unsafe_allow_html=True)
+            card_end()
 
 with tab_admin:
     st.markdown("### En çok şikayet alan numaralar")
 
-    # Filtreler
     q = st.text_input("Telefonla ara", placeholder="örn: 532 veya +90532")
     category_filter = st.selectbox("Kategori filtresi", ["Hepsi"] + CATEGORIES)
-    sort_by = st.selectbox("Sıralama", ["Şikayet (Azalan)", "Şikayet (Artan)", "Son Şikayet (Yeni)", "Son Şikayet (Eski)"])
+    sort_by = st.selectbox(
+        "Sıralama",
+        ["Şikayet (Azalan)", "Şikayet (Artan)", "Son Şikayet (Yeni)", "Son Şikayet (Eski)"]
+    )
     limit = st.slider("Kaç kayıt gösterilsin?", min_value=10, max_value=200, value=50, step=10)
 
     rows = list_top_numbers(limit=limit, q=q.strip(), category=category_filter, sort_by=sort_by)
@@ -528,15 +514,3 @@ with tab_admin:
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
-
-
-
-
-
-
-
-
-
-
-
-
