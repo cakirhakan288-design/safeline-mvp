@@ -179,6 +179,48 @@ def set_category(number_id: int, category: str):
     conn.commit()
     conn.close()
 
+def get_type_counts(number_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT report_type, COUNT(*) 
+        FROM reports
+        WHERE number_id = ?
+        GROUP BY report_type
+    """, (number_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return {rt: cnt for rt, cnt in rows}
+
+def decide_auto_category(counts: dict, total_reports: int) -> str:
+    # Öncelik: Dolandırıcılık > Bahis > Şüpheli
+    if counts.get("Dolandırıcılık", 0) >= 2:
+        return "Dolandırıcılık"
+    if counts.get("Bahis", 0) >= 2:
+        return "Bahis"
+    if counts.get("Şüpheli", 0) >= 2:
+        return "Şüpheli"
+    if total_reports >= 3:
+        return "Şüpheli"
+    return "Bilinmiyor"
+
+def auto_update_category(number_id: int):
+    # mevcut kategori Güvenli ise otomatik bozma
+    row = get_number(number_id)
+    if not row:
+        return
+    _, _, current_category, _ = row
+    if current_category == "Güvenli":
+        return
+
+    counts = get_type_counts(number_id)
+    total, score = get_stats(number_id)  # total_reports burada
+    new_cat = decide_auto_category(counts, total)
+
+    if new_cat != current_category:
+        set_category(number_id, new_cat)
+
+
 def get_reports(number_id: int, limit: int = 20):
     conn = get_conn()
     cur = conn.cursor()
@@ -365,8 +407,10 @@ with tab_query:
 
             message_excerpt = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: 'Bonus için linke tıkla...'")
             if st.button("Şikayeti Kaydet", type="primary"):
-                add_report(_id, report_type, channel, message_excerpt)
-                st.success("Şikayet kaydedildi. Skor güncellendi.")
+            add_report(_id, report_type, channel, message_excerpt)
+            auto_update_category(_id)
+            st.success("Şikayet kaydedildi. Skor ve kategori güncellendi.")
+
             card_end()
 
             # Latest reports
@@ -401,5 +445,6 @@ with tab_admin:
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
+
 
 
