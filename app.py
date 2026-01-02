@@ -5,8 +5,11 @@ import streamlit as st
 DB_PATH = "safeline.db"
 
 CATEGORIES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli", "Bilinmiyor"]
+REPORT_TYPES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli"]
 CHANNELS = ["Arama", "SMS", "WhatsApp", "Diğer"]
 
+
+# -------------------- DB --------------------
 def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
@@ -39,7 +42,6 @@ def init_db():
     conn.close()
 
 def normalize_phone(p: str) -> str:
-    # MVP normalize: trim spaces. (İstersen daha sonra +90/0 düzenleyebiliriz)
     return (p or "").strip()
 
 def upsert_number(phone_number: str):
@@ -50,7 +52,7 @@ def upsert_number(phone_number: str):
     row = cur.fetchone()
     if row:
         conn.close()
-        return row  # (id, phone_number, category, last_reported_at)
+        return row
 
     cur.execute(
         "INSERT INTO numbers (phone_number, category, last_reported_at) VALUES (?, ?, ?)",
@@ -70,10 +72,17 @@ def add_report(number_id: int, report_type: str, channel: str, message_excerpt: 
         "INSERT INTO reports (number_id, report_type, channel, message_excerpt, created_at) VALUES (?, ?, ?, ?, ?)",
         (number_id, report_type, channel, message_excerpt or None, now)
     )
-    # last_reported_at güncelle
     cur.execute("UPDATE numbers SET last_reported_at = ? WHERE id = ?", (now, number_id))
     conn.commit()
     conn.close()
+
+def get_number(number_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE id = ?", (number_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
 
 def get_stats(number_id: int):
     conn = get_conn()
@@ -91,7 +100,7 @@ def set_category(number_id: int, category: str):
     conn.commit()
     conn.close()
 
-def get_reports(number_id: int, limit: int = 50):
+def get_reports(number_id: int, limit: int = 20):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -105,7 +114,7 @@ def get_reports(number_id: int, limit: int = 50):
     conn.close()
     return rows
 
-def list_numbers(limit: int = 50):
+def list_top_numbers(limit: int = 30):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -119,107 +128,197 @@ def list_numbers(limit: int = 50):
     conn.close()
     return rows
 
-def risk_badge(score: int) -> str:
-    if score >= 61:
-        return "🔴 Yüksek Risk"
-    if score >= 31:
-        return "🟡 Şüpheli"
-    return "🟢 Düşük Risk"
 
-# ---------- UI ----------
-st.set_page_config(page_title="SafeLine AI MVP", page_icon="🛡️", layout="centered")
+# -------------------- UI Helpers --------------------
+def risk_label(score: int) -> str:
+    if score >= 61:
+        return "Yüksek Risk"
+    if score >= 31:
+        return "Şüpheli"
+    return "Düşük Risk"
+
+def risk_color(score: int) -> str:
+    if score >= 61:
+        return "#ef4444"  # red
+    if score >= 31:
+        return "#f59e0b"  # amber
+    return "#22c55e"      # green
+
+def badge_html(text: str, bg: str) -> str:
+    return f"""
+    <span style="
+        display:inline-block;
+        padding:6px 10px;
+        border-radius:999px;
+        background:{bg};
+        color:white;
+        font-weight:700;
+        font-size:14px;
+        line-height:1;
+        vertical-align:middle;
+    ">{text}</span>
+    """
+
+def card_start():
+    st.markdown("""<div class="card">""", unsafe_allow_html=True)
+
+def card_end():
+    st.markdown("""</div>""", unsafe_allow_html=True)
+
+
+# -------------------- Page config + CSS --------------------
+st.set_page_config(page_title="SafeLine AI", page_icon="🛡️", layout="centered")
+
+st.markdown("""
+<style>
+/* Make it feel like a mobile app */
+.block-container { padding-top: 1.1rem; padding-bottom: 2.5rem; max-width: 720px; }
+h1 { font-size: 1.55rem !important; }
+h2, h3 { letter-spacing: -0.2px; }
+
+.card {
+  border: 1px solid rgba(49, 51, 63, 0.12);
+  border-radius: 16px;
+  padding: 14px 14px 10px 14px;
+  margin-bottom: 12px;
+  background: rgba(255,255,255,0.03);
+}
+
+.big {
+  font-size: 2.0rem;
+  font-weight: 800;
+  margin: 0;
+}
+
+.subtle {
+  opacity: 0.78;
+  font-size: 0.95rem;
+}
+
+.stButton>button {
+  width: 100%;
+  border-radius: 14px;
+  padding: 0.75rem 0.9rem;
+  font-weight: 700;
+}
+
+.stTextInput>div>div>input {
+  border-radius: 14px;
+  padding: 0.75rem 0.9rem;
+  font-size: 1.05rem;
+}
+
+.stTextArea textarea {
+  border-radius: 14px;
+}
+
+small { opacity: 0.8; }
+</style>
+""", unsafe_allow_html=True)
+
 init_db()
 
-st.title("🛡️ SafeLine AI — MVP (Python)")
-st.caption("Numara sorgula → risk gör → şikayet ekle. (Veriler SQLite’da yerel saklanır)")
+# -------------------- App --------------------
+st.title("🛡️ SafeLine AI")
+st.caption("Numara sorgula → risk gör → şikayet ekle. (MVP)")
 
-tab1, tab2 = st.tabs(["🔎 Sorgula", "📊 Admin / Liste"])
+tab_query, tab_admin = st.tabs(["🔎 Sorgula", "📊 Liste"])
 
-with tab1:
-    phone_input = st.text_input("Telefon numarası", placeholder="0532... veya +90...")
-    colA, colB = st.columns([1, 1])
-    with colA:
-        do_lookup = st.button("Sorgula", use_container_width=True)
-    with colB:
-        st.write("")  # spacer
+with tab_query:
+    card_start()
+    st.markdown("### Telefon numarası")
+    phone_input = st.text_input("", placeholder="0532... veya +90...", label_visibility="collapsed")
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        do_lookup = st.button("Sorgula")
+    with col2:
+        clear = st.button("Temizle")
+
+    if clear:
+        st.session_state.pop("current_number_id", None)
+        st.rerun()
 
     if do_lookup:
         phone = normalize_phone(phone_input)
         if not phone:
             st.error("Lütfen bir numara gir.")
         else:
-            num_row = upsert_number(phone)
-            st.session_state["current_number_id"] = num_row[0]
+            row = upsert_number(phone)
+            st.session_state["current_number_id"] = row[0]
+    card_end()
 
     number_id = st.session_state.get("current_number_id")
-
     if number_id:
-        # Fetch number row
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE id = ?", (number_id,))
-        row = cur.fetchone()
-        conn.close()
-
+        row = get_number(number_id)
         if not row:
             st.warning("Kayıt bulunamadı. Tekrar sorgula.")
         else:
             _id, phone_number, category, last_reported_at = row
             reports_count, score = get_stats(_id)
 
-            st.subheader(f"📞 {phone_number}")
-            st.markdown(f"**Risk Skoru:** `{score}` — {risk_badge(score)}")
-            st.markdown(f"**Kategori:** `{category}`")
-            st.markdown(f"**Şikayet Sayısı:** `{reports_count}`")
-            st.markdown(f"**Son Şikayet:** `{last_reported_at or '-'}`")
-
-            st.divider()
+            card_start()
+            st.markdown(f"### 📞 {phone_number}")
+            st.markdown(
+                badge_html(f"{score}/100 • {risk_label(score)}", risk_color(score)),
+                unsafe_allow_html=True
+            )
+            st.markdown(f"<div class='subtle' style='margin-top:10px'>Kategori: <b>{category}</b> • Şikayet: <b>{reports_count}</b></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='subtle'>Son şikayet: <b>{last_reported_at or '-'}</b></div>", unsafe_allow_html=True)
+            card_end()
 
             # Category update
-            st.write("### Kategori güncelle")
-            new_cat = st.selectbox("Kategori seç", CATEGORIES, index=CATEGORIES.index(category) if category in CATEGORIES else 4)
+            card_start()
+            st.markdown("### Kategori güncelle")
+            new_cat = st.selectbox("Kategori", CATEGORIES, index=CATEGORIES.index(category) if category in CATEGORIES else 4)
             if st.button("Kategoriyi Kaydet"):
                 set_category(_id, new_cat)
                 st.success("Kategori güncellendi.")
-
-            st.divider()
+            card_end()
 
             # Add report
-            st.write("### Şikayet ekle")
+            card_start()
+            st.markdown("### 🚨 Şikayet ekle")
             rcol1, rcol2 = st.columns(2)
             with rcol1:
-                report_type = st.selectbox("Şikayet türü", CATEGORIES[:-1], index=0)  # Bilinmiyor hariç
+                report_type = st.selectbox("Tür", REPORT_TYPES, index=0)
             with rcol2:
                 channel = st.selectbox("Kanal", CHANNELS, index=0)
 
-            message_excerpt = st.text_area("Mesajdan kısa parça (opsiyonel)", placeholder="Örn: 'Bonus için şu linke tıkla...'")
+            message_excerpt = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: 'Bonus için linke tıkla...'")
             if st.button("Şikayeti Kaydet", type="primary"):
                 add_report(_id, report_type, channel, message_excerpt)
-                st.success("Şikayet kaydedildi. Skor otomatik güncellendi.")
+                st.success("Şikayet kaydedildi. Skor güncellendi.")
+            card_end()
 
-            st.divider()
-
-            # Show reports
-            st.write("### Son şikayetler")
-            reps = get_reports(_id, limit=20)
+            # Latest reports
+            reps = get_reports(_id, limit=15)
+            card_start()
+            st.markdown("### Son şikayetler")
             if not reps:
                 st.info("Henüz şikayet yok.")
             else:
                 for rt, ch, msg, ts in reps:
-                    st.markdown(f"- **{rt}** / {ch} — {ts}")
+                    st.markdown(f"- **{rt}** / {ch}  \n  <small>{ts}</small>", unsafe_allow_html=True)
                     if msg:
-                        st.caption(msg)
+                        st.markdown(f"<div class='subtle'>{msg}</div>", unsafe_allow_html=True)
+            card_end()
 
-with tab2:
-    st.write("### En çok şikayet alan numaralar")
-    rows = list_numbers(limit=100)
+with tab_admin:
+    st.markdown("### En çok şikayet alan numaralar")
+    rows = list_top_numbers(limit=50)
     if not rows:
         st.info("Henüz kayıt yok.")
     else:
         for _id, phone, cat, last_ts, cnt in rows:
             score = min(100, cnt * 15)
-            st.markdown(f"**{phone}** — `{cat}` — Şikayet: `{cnt}` — Skor: `{score}` {risk_badge(score)}")
-            st.caption(f"Son: {last_ts or '-'}")
+            card_start()
+            st.markdown(f"**{phone}**")
+            st.markdown(
+                badge_html(f"{score}/100 • {risk_label(score)}", risk_color(score)),
+                unsafe_allow_html=True
+            )
+            st.markdown(f"<div class='subtle'>Kategori: <b>{cat}</b> • Şikayet: <b>{cnt}</b> • Son: <b>{last_ts or '-'}</b></div>", unsafe_allow_html=True)
             if st.button(f"Bu numarayı aç → {phone}", key=f"open_{_id}"):
                 st.session_state["current_number_id"] = _id
                 st.rerun()
+            card_end()
