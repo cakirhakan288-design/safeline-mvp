@@ -406,10 +406,11 @@ with tab_query:
                 channel = st.selectbox("Kanal", CHANNELS, index=0)
 
             message_excerpt = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: 'Bonus için linke tıkla...'")
-            if st.button("Şikayeti Kaydet", type="primary"):
-            add_report(_id, report_type, channel, message_excerpt)
-            auto_update_category(_id)
-            st.success("Şikayet kaydedildi. Skor ve kategori güncellendi.")
+           if st.button("Şikayeti Kaydet", type="primary"):
+    add_report(_id, report_type, channel, message_excerpt)
+    auto_update_category(_id)
+    st.success("Şikayet kaydedildi. Skor ve kategori güncellendi.")
+
 
             card_end()
 
@@ -445,6 +446,7 @@ with tab_admin:
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
+
 
 
 
