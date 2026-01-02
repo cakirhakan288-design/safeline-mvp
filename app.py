@@ -414,18 +414,22 @@ if st.button("Şikayeti Kaydet", type="primary"):
 card_end()
 
 
-            # Latest reports
-            reps = get_reports(_id, limit=15)
-            card_start()
-            st.markdown("### Son şikayetler")
-            if not reps:
-                st.info("Henüz şikayet yok.")
-            else:
-                for rt, ch, msg, ts in reps:
-                    st.markdown(f"- **{rt}** / {ch}  \n  <small>{ts}</small>", unsafe_allow_html=True)
-                    if msg:
-                        st.markdown(f"<div class='subtle'>{msg}</div>", unsafe_allow_html=True)
-            card_end()
+# Latest reports
+reps = get_reports(_id, limit=15)
+
+card_start()
+st.markdown("### Son şikayetler")
+
+if not reps:
+    st.info("Henüz şikayet yok.")
+else:
+    for rt, ch, msg, ts in reps:
+        st.markdown(f"- **{rt}** / {ch}  \n  <small>{ts}</small>", unsafe_allow_html=True)
+        if msg:
+            st.markdown(f"<div class='subtle'>{msg}</div>", unsafe_allow_html=True)
+
+card_end()
+
 
 with tab_admin:
     st.markdown("### En çok şikayet alan numaralar")
@@ -446,6 +450,7 @@ with tab_admin:
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
+
 
 
 
