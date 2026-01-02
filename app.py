@@ -438,6 +438,7 @@ if number_id:
 
 card_start()
 st.markdown("### Son şikayetler")
+reps = []
 
 if not reps:
     st.info("Henüz şikayet yok.")
@@ -469,6 +470,7 @@ with tab_admin:
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
+
 
 
 
