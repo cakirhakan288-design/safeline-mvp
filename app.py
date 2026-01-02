@@ -415,7 +415,26 @@ card_end()
 
 
 # Latest reports
-reps = get_reports(_id, limit=15)
+if number_id:
+    row = get_number(number_id)
+    if row:
+        _id, phone_number, category, last_reported_at = row
+
+        reps = get_reports(_id, limit=15)
+
+        card_start()
+        st.markdown("### Son şikayetler")
+
+        if not reps:
+            st.info("Henüz şikayet yok.")
+        else:
+            for rt, ch, msg, ts in reps:
+                st.markdown(f"- **{rt}** / {ch}  \n  <small>{ts}</small>", unsafe_allow_html=True)
+                if msg:
+                    st.markdown(f"<div class='subtle'>{msg}</div>", unsafe_allow_html=True)
+
+        card_end()
+
 
 card_start()
 st.markdown("### Son şikayetler")
@@ -450,6 +469,7 @@ with tab_admin:
                 st.session_state["current_number_id"] = _id
                 st.rerun()
             card_end()
+
 
 
 
