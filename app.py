@@ -73,7 +73,6 @@ def upsert_number(phone_number: str):
 
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
     row = cur.fetchone()
     if row:
@@ -283,11 +282,7 @@ def badge_html(text: str, bg: str) -> str:
 
 def post_admin_verified_to_wrapper():
     components.html(
-        """
-        <script>
-          try { window.parent.postMessage("ADMIN_VERIFIED", "*"); } catch(e) {}
-        </script>
-        """,
+        """<script>try{window.parent.postMessage("ADMIN_VERIFIED","*");}catch(e){}</script>""",
         height=0,
     )
 
@@ -296,18 +291,17 @@ def post_admin_verified_to_wrapper():
 st.set_page_config(page_title="SafeLine AI", page_icon="🛡️", layout="centered")
 init_db()
 
-# State
 if "is_admin" not in st.session_state:
     st.session_state["is_admin"] = False
 if "pin_tries" not in st.session_state:
     st.session_state["pin_tries"] = 0
 
-# Mobile feel
+# ✅ Header'ı KAPATMIYORUZ → Share/Link/Refresh geri gelir
+# Sadece sol üst menüyü gizliyoruz (istersen bunu da kaldırabiliriz)
 st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
-header {visibility: hidden;}
 .block-container { padding-top: .8rem; padding-bottom: 4.0rem; max-width: 820px; }
 .card {
   border: 1px solid rgba(49, 51, 63, 0.14);
@@ -341,7 +335,7 @@ header {visibility: hidden;}
 st.title("🛡️ SafeLine AI")
 st.caption("Numara sorgula → risk gör → şikayet ekle (MVP)")
 
-# -------- Navigation (query param destekli) --------
+# Navigation
 tab_param = st.query_params.get("tab", "query")
 tab_param = tab_param[0] if isinstance(tab_param, list) else tab_param
 default_nav = "Sorgula" if tab_param != "admin" else "Admin"
@@ -385,9 +379,7 @@ if nav == "Sorgula":
     number_id = st.session_state.get("current_number_id")
     if number_id:
         row = get_number(number_id)
-        if not row:
-            st.warning("Kayıt bulunamadı. Tekrar sorgula.")
-        else:
+        if row:
             _id, phone_number, category, last_reported_at = row
             reports_count, score = get_stats(_id)
 
@@ -401,7 +393,6 @@ if nav == "Sorgula":
             st.markdown(f"<div class='subtle'>Son şikayet: <b>{last_reported_at or '-'}</b></div>", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # Manuel kategori
             st.markdown("<div class='card'>", unsafe_allow_html=True)
             st.markdown("### Kategori güncelle (manuel)")
             new_cat = st.selectbox(
@@ -416,7 +407,6 @@ if nav == "Sorgula":
                 st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # Şikayet ekle + kategori otomatik
             st.markdown("<div class='card'>", unsafe_allow_html=True)
             st.markdown("### 🚨 Şikayet ekle")
             rcol1, rcol2 = st.columns(2)
@@ -430,7 +420,6 @@ if nav == "Sorgula":
                 "Kategori (şikayetle birlikte)",
                 category_options,
                 index=0,
-                help="Varsayılan: seçtiğin şikayet türü kategoriye otomatik yazılır. İstersen farklı seçebilirsin.",
                 key="report_category_mode"
             )
             message_excerpt = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: 'Bonus için linke tıkla...'", key="msg")
@@ -440,20 +429,11 @@ if nav == "Sorgula":
                     st.warning("⚠️ Bu numara için son 24 saat içinde zaten şikayet eklenmiş.")
                 else:
                     add_report(_id, report_type, channel, message_excerpt)
-
-                    if chosen_category_mode == "Otomatik (Tür ile aynı)":
-                        set_category(_id, report_type)
-                        st.info(f"📌 Kategori şikayet türüne göre güncellendi: **{report_type}**")
-                    else:
-                        set_category(_id, chosen_category_mode)
-                        st.info(f"📌 Kategori manuel seçime göre güncellendi: **{chosen_category_mode}**")
-
+                    set_category(_id, report_type if chosen_category_mode == "Otomatik (Tür ile aynı)" else chosen_category_mode)
                     st.success("Şikayet kaydedildi. Skor güncellendi.")
                     st.rerun()
-
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # Son şikayetler
             reps = get_reports(_id, limit=15)
             st.markdown("<div class='card'>", unsafe_allow_html=True)
             st.markdown("### Son şikayetler")
@@ -472,8 +452,6 @@ else:
     if not st.session_state.get("is_admin", False):
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("### 🔐 Admin girişi")
-        st.caption("Dashboard + Liste + CSV sadece admin için açık.")
-
         pin = st.text_input("PIN", type="password", placeholder="4 haneli PIN")
         col_a, col_b = st.columns(2)
         with col_a:
@@ -495,8 +473,6 @@ else:
             else:
                 st.session_state["pin_tries"] += 1
                 st.error("Yanlış PIN.")
-                if st.session_state["pin_tries"] >= 5:
-                    st.warning("Çok fazla deneme yaptın. Bir süre sonra tekrar dene.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     else:
@@ -536,35 +512,15 @@ else:
             st.markdown("<div class='card'>", unsafe_allow_html=True)
             st.markdown("#### Tür Dağılımı (Son 30 gün)")
             dist_type = get_distribution("report_type", 30)
-            if dist_type.empty:
-                st.info("Veri yok.")
-            else:
-                st.bar_chart(dist_type.set_index("name"), height=220)
+            st.bar_chart(dist_type.set_index("name"), height=220) if not dist_type.empty else st.info("Veri yok.")
             st.markdown("</div>", unsafe_allow_html=True)
 
         with cR:
             st.markdown("<div class='card'>", unsafe_allow_html=True)
             st.markdown("#### Kanal Dağılımı (Son 30 gün)")
             dist_ch = get_distribution("channel", 30)
-            if dist_ch.empty:
-                st.info("Veri yok.")
-            else:
-                st.bar_chart(dist_ch.set_index("name"), height=220)
+            st.bar_chart(dist_ch.set_index("name"), height=220) if not dist_ch.empty else st.info("Veri yok.")
             st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown("#### En riskli 10 numara")
-        top10 = list_top_numbers(limit=10, q="", category="Hepsi", sort_by="Şikayet (Azalan)")
-        if not top10:
-            st.info("Kayıt yok.")
-        else:
-            for _id, phone, cat, last_ts, cnt in top10:
-                score = min(100, cnt * 15)
-                st.markdown(
-                    f"**{phone}** — {cnt} şikayet — {badge_html(f'{score}/100 • {risk_label(score)}', risk_color(score))} — {cat}",
-                    unsafe_allow_html=True
-                )
-        st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("---")
         st.markdown("### 🔎 Filtreli liste (CSV bu filtrelere göre iner)")
