@@ -1,189 +1,242 @@
-<!doctype html>
-<html lang="tr">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="theme-color" content="#0b1220" />
+import sqlite3
+from datetime import datetime
+import streamlit as st
 
-  <!-- iOS PWA -->
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="SafeLine">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+# ================= CONFIG =================
+DB_PATH = "safeline.db"
+ADMIN_PIN = "2468"
 
-  <!-- Manifest & icons -->
-  <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="icon" href="/icons/icon-192.png" />
-  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+CATEGORIES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli", "Bilinmiyor"]
+REPORT_TYPES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli"]
+CHANNELS = ["Arama", "SMS", "WhatsApp", "Diğer"]
 
-  <title>SafeLine</title>
+# ================= DB =================
+def get_conn():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-  <style>
-    html, body {
-      height: 100%;
-      margin: 0;
-      background: #0b1220;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont,
-                   "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    }
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS numbers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT UNIQUE,
+            category TEXT DEFAULT 'Bilinmiyor',
+            last_reported_at TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number_id INTEGER,
+            report_type TEXT,
+            channel TEXT,
+            message_excerpt TEXT,
+            created_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-    /* Topbar */
-    .topbar {
-      height: 56px;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 0 12px;
-      color: #ffffff;
-      font-weight: 800;
-      font-size: 16px;
-      position: sticky;
-      top: 0;
-      z-index: 100;
-      backdrop-filter: blur(12px);
-      background: rgba(11,18,32,0.85);
-      border-bottom: 1px solid rgba(255,255,255,0.08);
-    }
+# ================= HELPERS =================
+def normalize_phone(p):
+    if not p:
+        return ""
+    d = "".join(c for c in p if c.isdigit())
+    if d.startswith("0"):
+        d = d[1:]
+    if len(d) == 10:
+        return "+90" + d
+    if d.startswith("90"):
+        return "+" + d
+    return "+" + d
 
-    .actions { margin-left:auto; display:flex; gap:8px; }
+def upsert_number(phone):
+    phone = normalize_phone(phone)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM numbers WHERE phone_number=?", (phone,))
+    row = cur.fetchone()
+    if row:
+        conn.close()
+        return row
+    cur.execute(
+        "INSERT INTO numbers (phone_number, category) VALUES (?,?)",
+        (phone, "Bilinmiyor")
+    )
+    conn.commit()
+    cur.execute("SELECT * FROM numbers WHERE phone_number=?", (phone,))
+    row = cur.fetchone()
+    conn.close()
+    return row
 
-    .iconbtn {
-      width: 40px;
-      height: 40px;
-      border-radius: 12px;
-      border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(255,255,255,0.06);
-      color: #fff;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-    }
+def has_recent_report(number_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT COUNT(*) FROM reports
+        WHERE number_id=?
+        AND datetime(created_at) >= datetime('now','-24 hours')
+    """, (number_id,))
+    r = cur.fetchone()[0]
+    conn.close()
+    return r > 0
 
-    .wrap { height: calc(100% - 56px); position: relative; }
-    iframe { width:100%; height:100%; border:0; background:#fff; }
+def add_report(number_id, report_type, channel, msg):
+    now = datetime.utcnow().isoformat()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO reports (number_id, report_type, channel, message_excerpt, created_at)
+        VALUES (?,?,?,?,?)
+    """, (number_id, report_type, channel, msg, now))
+    cur.execute("UPDATE numbers SET last_reported_at=? WHERE id=?", (now, number_id))
+    conn.commit()
+    conn.close()
 
-    /* FaceID modal */
-    .faceid {
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,0.55);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 999;
-    }
+def get_stats(number_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM reports WHERE number_id=?", (number_id,))
+    cnt = cur.fetchone()[0]
+    conn.close()
+    return cnt, min(100, cnt * 15)
 
-    .faceid-card {
-      width: 280px;
-      background: #111827;
-      border-radius: 24px;
-      padding: 22px 18px;
-      color: #fff;
-      text-align: center;
-      box-shadow: 0 30px 80px rgba(0,0,0,0.5);
-    }
+def get_reports(number_id, limit=15):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT report_type, channel, message_excerpt, created_at
+        FROM reports
+        WHERE number_id=?
+        ORDER BY created_at DESC
+        LIMIT ?
+    """, (number_id, limit))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
-    .faceid-icon {
-      font-size: 42px;
-      margin-bottom: 10px;
-    }
+def set_category(number_id, category):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE numbers SET category=? WHERE id=?", (category, number_id))
+    conn.commit()
+    conn.close()
 
-    .faceid-title {
-      font-weight: 900;
-      margin-bottom: 6px;
-    }
+# ================= ADMIN =================
+def list_numbers():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT n.id, n.phone_number, n.category,
+        (SELECT COUNT(*) FROM reports r WHERE r.number_id=n.id) cnt
+        FROM numbers n
+        ORDER BY cnt DESC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
-    .faceid-text {
-      opacity: 0.85;
-      font-size: 14px;
-      margin-bottom: 16px;
-    }
+def get_total_numbers():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM numbers")
+    r = cur.fetchone()[0]
+    conn.close()
+    return r
 
-    .faceid-actions {
-      display: flex;
-      gap: 10px;
-    }
+def get_total_reports():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM reports")
+    r = cur.fetchone()[0]
+    conn.close()
+    return r
 
-    .faceid-btn {
-      flex: 1;
-      border: 0;
-      border-radius: 14px;
-      padding: 10px;
-      font-weight: 800;
-      cursor: pointer;
-    }
+# ================= PAGE =================
+st.set_page_config(page_title="SafeLine AI", page_icon="🛡️", layout="centered")
+init_db()
 
-    .allow { background:#22c55e; color:#062e12; }
-    .deny { background:#ef4444; color:#2b0606; }
+# -------- Query param ile sekme seçimi --------
+params = st.query_params
+default_tab = params.get("tab", ["query"])[0]
 
-    .hidden { display:none; }
-  </style>
-</head>
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = default_tab
 
-<body>
-  <div class="topbar">
-    🛡️ SafeLine
-    <div class="actions">
-      <button class="iconbtn" id="adminBtn" title="Admin">⚙️</button>
-    </div>
-  </div>
+st.title("🛡️ SafeLine AI")
 
-  <div class="wrap">
-    <iframe
-      id="appFrame"
-      src="https://safeline-mvp-idev9dt6u55ne4hfzejhxu.streamlit.app/?embed=true&toolbar=false"
-      referrerpolicy="no-referrer"
-    ></iframe>
-  </div>
+tab_query, tab_admin = st.tabs(["🔍 Sorgula", "📊 Admin"])
 
-  <!-- FaceID Modal -->
-  <div id="faceIdModal" class="faceid hidden">
-    <div class="faceid-card">
-      <div class="faceid-icon">🙂</div>
-      <div class="faceid-title">Face ID</div>
-      <div class="faceid-text">Admin paneline erişmek için doğrula</div>
-      <div class="faceid-actions">
-        <button class="faceid-btn deny" id="faceCancel">İptal</button>
-        <button class="faceid-btn allow" id="faceOk">Devam</button>
-      </div>
-    </div>
-  </div>
+# ================= TAB: SORGULA =================
+with tab_query:
+    if st.session_state.active_tab != "query":
+        st.session_state.active_tab = "query"
 
-  <script>
-    const ADMIN_KEY = "safeline_admin_verified";
-    const frame = document.getElementById("appFrame");
-    const modal = document.getElementById("faceIdModal");
+    phone = st.text_input("Telefon numarası", placeholder="0532... veya +90...")
+    if st.button("Sorgula"):
+        row = upsert_number(phone)
+        st.session_state.num_id = row[0]
 
-    // Admin butonu
-    document.getElementById("adminBtn").addEventListener("click", () => {
-      if (localStorage.getItem(ADMIN_KEY) === "true") {
-        showFaceId();
-      } else {
-        // İlk giriş: direkt Streamlit admin sekmesi
-        frame.src = frame.src.split("?")[0] + "?embed=true&toolbar=false&tab=admin";
-      }
-    });
+    if "num_id" in st.session_state:
+        num_id = st.session_state.num_id
+        cnt, score = get_stats(num_id)
+        st.metric("Risk Skoru", score)
 
-    function showFaceId() {
-      modal.classList.remove("hidden");
-    }
+        st.subheader("🚨 Şikayet ekle")
+        report_type = st.selectbox("Şikayet türü", REPORT_TYPES)
+        channel = st.selectbox("Kanal", CHANNELS)
+        category_mode = st.selectbox(
+            "Kategori",
+            ["Otomatik (Tür ile aynı)"] + CATEGORIES
+        )
+        msg = st.text_area("Açıklama (opsiyonel)")
 
-    document.getElementById("faceOk").addEventListener("click", () => {
-      modal.classList.add("hidden");
-      frame.src = frame.src.split("?")[0] + "?embed=true&toolbar=false&tab=admin";
-    });
+        if st.button("Şikayeti Kaydet"):
+            if has_recent_report(num_id):
+                st.warning("24 saat içinde zaten şikayet var")
+            else:
+                add_report(num_id, report_type, channel, msg)
+                if category_mode == "Otomatik (Tür ile aynı)":
+                    set_category(num_id, report_type)
+                else:
+                    set_category(num_id, category_mode)
+                st.success("Şikayet kaydedildi")
 
-    document.getElementById("faceCancel").addEventListener("click", () => {
-      modal.classList.add("hidden");
-    });
+        st.subheader("Son şikayetler")
+        for r in get_reports(num_id):
+            st.write(r)
 
-    // Streamlit tarafı ilk admin PIN’den sonra bunu set edebilir
-    // Şimdilik manuel olarak set ediyoruz:
-    window.addEventListener("message", (e) => {
-      if (e.data === "ADMIN_VERIFIED") {
-        localStorage.setItem(ADMIN_KEY, "true");
-      }
-    });
-  </script>
-</body>
-</html>
+# ================= TAB: ADMIN =================
+with tab_admin:
+    if st.session_state.active_tab != "admin":
+        st.session_state.active_tab = "admin"
+
+    if "admin" not in st.session_state:
+        st.session_state.admin = False
+
+    if not st.session_state.admin:
+        pin = st.text_input("Admin PIN", type="password")
+        if st.button("Giriş"):
+            if pin == ADMIN_PIN:
+                st.session_state.admin = True
+                st.success("Giriş başarılı")
+            else:
+                st.error("Yanlış PIN")
+    else:
+        if st.button("🚪 Çıkış"):
+            st.session_state.admin = False
+            st.rerun()
+
+        st.metric("Toplam numara", get_total_numbers())
+        st.metric("Toplam şikayet", get_total_reports())
+
+        rows = list_numbers()
+        csv = "phone,category,count\n"
+        for r in rows:
+            csv += f"{r[1]},{r[2]},{r[3]}\n"
+
+        st.download_button("CSV indir", csv, "safeline.csv")
+
+        for r in rows:
+            st.write(r)
