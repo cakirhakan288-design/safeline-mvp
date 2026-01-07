@@ -4,6 +4,10 @@ import streamlit as st
 
 DB_PATH = "safeline.db"
 
+# -------- ADMIN PIN (buradan değiştir) --------
+ADMIN_PIN = "2468"
+# --------------------------------------------
+
 CATEGORIES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli", "Bilinmiyor"]
 REPORT_TYPES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli"]
 CHANNELS = ["Arama", "SMS", "WhatsApp", "Diğer"]
@@ -57,39 +61,32 @@ def normalize_phone(p: str) -> str:
         return ""
 
     s = p.strip()
-    # sadece rakamları ve + işaretini tut
     s2 = []
     for ch in s:
         if ch.isdigit() or ch == "+":
             s2.append(ch)
     s = "".join(s2)
 
-    # baştaki + haricindeki + ları temizle
     if s.count("+") > 1:
         s = "+" + s.replace("+", "")
 
-    # +90 ile
     if s.startswith("+90"):
         digits = "".join([c for c in s if c.isdigit()])
         return "+" + digits
 
-    # 90 ile
     if s.startswith("90"):
         digits = "".join([c for c in s if c.isdigit()])
         return "+" + digits
 
-    # 0 ile (0532...)
     if s.startswith("0"):
         digits = "".join([c for c in s if c.isdigit()])
-        digits = digits[1:]  # 0'ı at
+        digits = digits[1:]
         return "+90" + digits
 
-    # 10 haneli direkt (532...)
     digits = "".join([c for c in s if c.isdigit()])
     if len(digits) == 10 and digits.startswith("5"):
         return "+90" + digits
 
-    # fallback
     if digits:
         return "+" + digits if not s.startswith("+") else s
 
@@ -169,12 +166,6 @@ def has_recent_report(number_id: int, hours: int = 24) -> bool:
 
 
 def upsert_number(phone_number: str):
-    """
-    1) girilen numarayı normalize eder (kanonik: +90xxxxxxxxxx)
-    2) DB'de birebir eşleşme yoksa, mevcut kayıtları da normalize edip eşleştirmeye çalışır
-    3) eşleşme bulursa o kaydı döndürür ve phone_number'ı kanonik formata günceller
-    4) hiç yoksa yeni kayıt açar (kanonik formatla)
-    """
     canonical = normalize_phone(phone_number)
     if not canonical:
         return None
@@ -182,26 +173,25 @@ def upsert_number(phone_number: str):
     conn = get_conn()
     cur = conn.cursor()
 
-    # 1) birebir (kanonik) eşleşme
+    # 1) birebir eşleşme
     cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
     row = cur.fetchone()
     if row:
         conn.close()
         return row
 
-    # 2) eski kayıtlar arasında normalize ederek eşleşme ara
+    # 2) normalize ederek eski kayıtlarla eşleştir
     cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers")
     all_rows = cur.fetchall()
 
-    for r in all_rows:
-        rid, rphone, rcat, rlast = r
+    for rid, rphone, rcat, rlast in all_rows:
         if normalize_phone(rphone) == canonical:
             cur.execute("UPDATE numbers SET phone_number = ? WHERE id = ?", (canonical, rid))
             conn.commit()
             conn.close()
             return (rid, canonical, rcat, rlast)
 
-    # 3) yoksa yeni kayıt aç
+    # 3) yoksa yeni kayıt
     cur.execute(
         "INSERT INTO numbers (phone_number, category, last_reported_at) VALUES (?, ?, ?)",
         (canonical, "Bilinmiyor", None)
@@ -367,10 +357,7 @@ h2, h3 { letter-spacing: -0.2px; }
   background: rgba(255,255,255,0.03);
 }
 
-.subtle {
-  opacity: 0.78;
-  font-size: 0.95rem;
-}
+.subtle { opacity: 0.78; font-size: 0.95rem; }
 
 .stButton>button {
   width: 100%;
@@ -385,20 +372,25 @@ h2, h3 { letter-spacing: -0.2px; }
   font-size: 1.05rem;
 }
 
-.stTextArea textarea {
-  border-radius: 14px;
-}
+.stTextArea textarea { border-radius: 14px; }
 </style>
 """, unsafe_allow_html=True)
 
 init_db()
 
+if "is_admin" not in st.session_state:
+    st.session_state["is_admin"] = False
+if "pin_tries" not in st.session_state:
+    st.session_state["pin_tries"] = 0
+
 # -------------------- App --------------------
 st.title("🛡️ SafeLine AI")
 st.caption("Numara sorgula → risk gör → şikayet ekle. (MVP)")
 
-tab_query, tab_admin = st.tabs(["🔎 Sorgula", "📊 Liste"])
+tab_query, tab_admin = st.tabs(["🔎 Sorgula", "📊 Liste (Admin)"])
 
+
+# -------------------- TAB: Sorgula --------------------
 with tab_query:
     card_start()
     st.markdown("### Telefon numarası")
@@ -451,7 +443,11 @@ with tab_query:
             # Kategori güncelle (manuel)
             card_start()
             st.markdown("### Kategori güncelle")
-            new_cat = st.selectbox("Kategori", CATEGORIES, index=CATEGORIES.index(category) if category in CATEGORIES else 4)
+            new_cat = st.selectbox(
+                "Kategori",
+                CATEGORIES,
+                index=CATEGORIES.index(category) if category in CATEGORIES else len(CATEGORIES) - 1
+            )
             if st.button("Kategoriyi Kaydet"):
                 set_category(_id, new_cat)
                 st.success("Kategori güncellendi.")
@@ -474,10 +470,8 @@ with tab_query:
                 else:
                     add_report(_id, report_type, channel, message_excerpt)
                     new_cat2 = auto_update_category(_id)
-
                     if new_cat2:
                         st.info(f"📌 Otomatik kategori güncellendi: **{new_cat2}**")
-
                     st.success("Şikayet kaydedildi. Skor güncellendi.")
             card_end()
 
@@ -494,56 +488,95 @@ with tab_query:
                         st.markdown(f"<div class='subtle'>{msg}</div>", unsafe_allow_html=True)
             card_end()
 
+
+# -------------------- TAB: Admin (PIN + Logout) --------------------
 with tab_admin:
-    st.markdown("### En çok şikayet alan numaralar")
+    # Admin değilse: PIN ekranı
+    if not st.session_state.get("is_admin", False):
+        card_start()
+        st.markdown("### 🔐 Admin girişi")
+        st.caption("Liste ve CSV indirme sadece admin için açık.")
 
-    q = st.text_input("Telefonla ara", placeholder="örn: 532 veya +90532")
-    category_filter = st.selectbox("Kategori filtresi", ["Hepsi"] + CATEGORIES)
-    sort_by = st.selectbox(
-        "Sıralama",
-        ["Şikayet (Azalan)", "Şikayet (Artan)", "Son Şikayet (Yeni)", "Son Şikayet (Eski)"]
-    )
-    limit = st.slider("Kaç kayıt gösterilsin?", min_value=10, max_value=200, value=50, step=10)
+        pin = st.text_input("PIN", type="password", placeholder="4 haneli PIN")
+        col_a, col_b = st.columns(2)
 
-    rows = list_top_numbers(limit=limit, q=q.strip(), category=category_filter, sort_by=sort_by)
+        with col_a:
+            login = st.button("Giriş Yap", type="primary")
+        with col_b:
+            reset = st.button("Sıfırla")
 
-    # -------------------- CSV Export (E) --------------------
-    # rows yapısında: (_id, phone, cat, last_ts, cnt)
-    csv_header = "id,phone_number,category,last_reported_at,reports_count,score,risk_label\n"
-    csv_lines = [csv_header]
-    for _id, phone, cat, last_ts, cnt in rows:
-        score = min(100, cnt * 15)
-        label = risk_label(score)
-        # CSV kaçış basit MVP: virgül içermeyen alanlar varsayımı (phone/cat/label güvenli)
-        last_ts_safe = (last_ts or "").replace(",", " ")
-        csv_lines.append(f"{_id},{phone},{cat},{last_ts_safe},{cnt},{score},{label}\n")
-    csv_data = "".join(csv_lines)
+        if reset:
+            st.session_state["pin_tries"] = 0
+            st.rerun()
 
-    st.download_button(
-        label="⬇️ CSV indir (filtreli liste)",
-        data=csv_data.encode("utf-8"),
-        file_name="safeline_numbers.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
-    # -------------------------------------------------------
+        if login:
+            if pin == ADMIN_PIN:
+                st.session_state["is_admin"] = True
+                st.session_state["pin_tries"] = 0
+                st.success("Admin girişi başarılı.")
+                st.rerun()
+            else:
+                st.session_state["pin_tries"] += 1
+                st.error("Yanlış PIN.")
+                if st.session_state["pin_tries"] >= 5:
+                    st.warning("Çok fazla deneme yaptın. Bir süre sonra tekrar dene.")
+        card_end()
 
-    if not rows:
-        st.info("Kriterlere uygun kayıt yok.")
+    # Admin ise: içerik + çıkış
     else:
+        top_l, top_r = st.columns([3, 1])
+        with top_l:
+            st.markdown("### 📊 En çok şikayet alan numaralar")
+        with top_r:
+            if st.button("🚪 Admin çıkış", use_container_width=True):
+                st.session_state["is_admin"] = False
+                st.rerun()
+
+        q = st.text_input("Telefonla ara", placeholder="örn: 532 veya +90532")
+        category_filter = st.selectbox("Kategori filtresi", ["Hepsi"] + CATEGORIES)
+        sort_by = st.selectbox(
+            "Sıralama",
+            ["Şikayet (Azalan)", "Şikayet (Artan)", "Son Şikayet (Yeni)", "Son Şikayet (Eski)"]
+        )
+        limit = st.slider("Kaç kayıt gösterilsin?", min_value=10, max_value=200, value=50, step=10)
+
+        rows = list_top_numbers(limit=limit, q=q.strip(), category=category_filter, sort_by=sort_by)
+
+        # -------------------- CSV Export (E) --------------------
+        csv_header = "id,phone_number,category,last_reported_at,reports_count,score,risk_label\n"
+        csv_lines = [csv_header]
         for _id, phone, cat, last_ts, cnt in rows:
             score = min(100, cnt * 15)
-            card_start()
-            st.markdown(f"**{phone}**")
-            st.markdown(
-                badge_html(f"{score}/100 • {risk_label(score)}", risk_color(score)),
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                f"<div class='subtle'>Kategori: <b>{cat}</b> • Şikayet: <b>{cnt}</b> • Son: <b>{last_ts or '-'}</b></div>",
-                unsafe_allow_html=True
-            )
-            if st.button(f"Bu numarayı aç → {phone}", key=f"open_{_id}"):
-                st.session_state["current_number_id"] = _id
-                st.rerun()
-            card_end()
+            label = risk_label(score)
+            last_ts_safe = (last_ts or "").replace(",", " ")
+            csv_lines.append(f"{_id},{phone},{cat},{last_ts_safe},{cnt},{score},{label}\n")
+        csv_data = "".join(csv_lines)
+
+        st.download_button(
+            label="⬇️ CSV indir (filtreli liste)",
+            data=csv_data.encode("utf-8"),
+            file_name="safeline_numbers.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        # -------------------------------------------------------
+
+        if not rows:
+            st.info("Kriterlere uygun kayıt yok.")
+        else:
+            for _id, phone, cat, last_ts, cnt in rows:
+                score = min(100, cnt * 15)
+                card_start()
+                st.markdown(f"**{phone}**")
+                st.markdown(
+                    badge_html(f"{score}/100 • {risk_label(score)}", risk_color(score)),
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    f"<div class='subtle'>Kategori: <b>{cat}</b> • Şikayet: <b>{cnt}</b> • Son: <b>{last_ts or '-'}</b></div>",
+                    unsafe_allow_html=True
+                )
+                if st.button(f"Bu numarayı aç → {phone}", key=f"open_{_id}"):
+                    st.session_state["current_number_id"] = _id
+                    st.rerun()
+                card_end()
