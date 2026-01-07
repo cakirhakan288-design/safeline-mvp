@@ -49,38 +49,46 @@ def init_db():
 
 def normalize_phone(p: str) -> str:
     """
-    TR odaklı normalize (kanonik çıktı: +905xxxxxxxxx)
+    TR odaklı normalize (hedef çıktı: +905xxxxxxxxx)
     """
     if not p:
         return ""
 
     s = p.strip()
+
+    # sadece rakamları ve + tut
     s2 = []
     for ch in s:
         if ch.isdigit() or ch == "+":
             s2.append(ch)
     s = "".join(s2)
 
+    # birden fazla + varsa temizle
     if s.count("+") > 1:
         s = "+" + s.replace("+", "")
 
+    # +90xxxx
     if s.startswith("+90"):
         digits = "".join([c for c in s if c.isdigit()])
         return "+" + digits
 
+    # 90xxxx
     if s.startswith("90"):
         digits = "".join([c for c in s if c.isdigit()])
         return "+" + digits
 
+    # 0xxxx
     if s.startswith("0"):
         digits = "".join([c for c in s if c.isdigit()])
         digits = digits[1:]
         return "+90" + digits
 
+    # 10 hane 5xx...
     digits = "".join([c for c in s if c.isdigit()])
     if len(digits) == 10 and digits.startswith("5"):
         return "+90" + digits
 
+    # fallback
     if digits:
         return "+" + digits if not s.startswith("+") else s
 
@@ -170,12 +178,14 @@ def upsert_number(phone_number: str):
     conn = get_conn()
     cur = conn.cursor()
 
+    # 1) birebir eşleşme
     cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
     row = cur.fetchone()
     if row:
         conn.close()
         return row
 
+    # 2) eski kayıtlar içinde normalize ederek eşleşme ara
     cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers")
     all_rows = cur.fetchall()
     for rid, rphone, rcat, rlast in all_rows:
@@ -185,6 +195,7 @@ def upsert_number(phone_number: str):
             conn.close()
             return (rid, canonical, rcat, rlast)
 
+    # 3) yoksa yeni kayıt
     cur.execute(
         "INSERT INTO numbers (phone_number, category, last_reported_at) VALUES (?, ?, ?)",
         (canonical, "Bilinmiyor", None)
@@ -233,6 +244,8 @@ def auto_update_category(number_id: int):
         return None
 
     _, _, current_category, _ = row
+
+    # "Güvenli" otomatik bozulmasın (manuel karar)
     if current_category == "Güvenli":
         return None
 
@@ -322,357 +335,4 @@ def get_reports_last_hours(hours: int = 24) -> int:
     return n
 
 
-def get_top_category() -> tuple[str, int]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT report_type, COUNT(*) AS c
-        FROM reports
-        GROUP BY report_type
-        ORDER BY c DESC
-        LIMIT 1
-    """)
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        return ("-", 0)
-    return (row[0], row[1])
-
-
-def get_top_risky(limit: int = 5):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT n.id, n.phone_number, n.category, n.last_reported_at,
-               (SELECT COUNT(*) FROM reports r WHERE r.number_id = n.id) AS reports_count
-        FROM numbers n
-        ORDER BY reports_count DESC, n.last_reported_at DESC
-        LIMIT ?
-    """, (limit,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-# -------------------- UI Helpers --------------------
-def risk_label(score: int) -> str:
-    if score >= 61:
-        return "Yüksek Risk"
-    if score >= 31:
-        return "Şüpheli"
-    return "Düşük Risk"
-
-
-def risk_color(score: int) -> str:
-    if score >= 61:
-        return "#ef4444"  # red
-    if score >= 31:
-        return "#f59e0b"  # amber
-    return "#22c55e"      # green
-
-
-def badge_html(text: str, bg: str) -> str:
-    return f"""
-    <span style="
-        display:inline-block;
-        padding:6px 10px;
-        border-radius:999px;
-        background:{bg};
-        color:white;
-        font-weight:700;
-        font-size:14px;
-        line-height:1;
-        vertical-align:middle;
-    ">{text}</span>
-    """
-
-
-def card_start():
-    st.markdown("""<div class="card">""", unsafe_allow_html=True)
-
-
-def card_end():
-    st.markdown("""</div>""", unsafe_allow_html=True)
-
-
-# -------------------- Page config + CSS --------------------
-st.set_page_config(page_title="SafeLine AI", page_icon="🛡️", layout="centered")
-
-st.markdown("""
-<style>
-.block-container { padding-top: 1.1rem; padding-bottom: 2.5rem; max-width: 760px; }
-h1 { font-size: 1.55rem !important; }
-h2, h3 { letter-spacing: -0.2px; }
-
-.card {
-  border: 1px solid rgba(49, 51, 63, 0.12);
-  border-radius: 16px;
-  padding: 14px 14px 10px 14px;
-  margin-bottom: 12px;
-  background: rgba(255,255,255,0.03);
-}
-
-.subtle {
-  opacity: 0.78;
-  font-size: 0.95rem;
-}
-
-.stButton>button {
-  width: 100%;
-  border-radius: 14px;
-  padding: 0.75rem 0.9rem;
-  font-weight: 700;
-}
-
-.stTextInput>div>div>input {
-  border-radius: 14px;
-  padding: 0.75rem 0.9rem;
-  font-size: 1.05rem;
-}
-
-.stTextArea textarea {
-  border-radius: 14px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-init_db()
-
-if "is_admin" not in st.session_state:
-    st.session_state["is_admin"] = False
-if "pin_tries" not in st.session_state:
-    st.session_state["pin_tries"] = 0
-
-
-# -------------------- App --------------------
-st.title("🛡️ SafeLine AI")
-st.caption("Numara sorgula → risk gör → şikayet ekle. (MVP)")
-
-tab_query, tab_admin = st.tabs(["🔎 Sorgula", "📊 Liste (Admin)"])
-
-
-# -------------------- TAB: Sorgula --------------------
-with tab_query:
-    card_start()
-    st.markdown("### Telefon numarası")
-    phone_input = st.text_input("", placeholder="0532... veya +90...", label_visibility="collapsed")
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        do_lookup = st.button("Sorgula")
-    with col2:
-        clear = st.button("Temizle")
-
-    if clear:
-        st.session_state.pop("current_number_id", None)
-        st.rerun()
-
-    if do_lookup:
-        phone = normalize_phone(phone_input)
-        if not phone:
-            st.error("Lütfen bir numara gir.")
-        else:
-            row = upsert_number(phone)
-            if row:
-                st.session_state["current_number_id"] = row[0]
-    card_end()
-
-    number_id = st.session_state.get("current_number_id")
-    if number_id:
-        row = get_number(number_id)
-        if not row:
-            st.warning("Kayıt bulunamadı. Tekrar sorgula.")
-        else:
-            _id, phone_number, category, last_reported_at = row
-            reports_count, score = get_stats(_id)
-
-            card_start()
-            st.markdown(f"### 📞 {phone_number}")
-            st.markdown(badge_html(f"{score}/100 • {risk_label(score)}", risk_color(score)), unsafe_allow_html=True)
-            st.markdown(
-                f"<div class='subtle' style='margin-top:10px'>Kategori: <b>{category}</b> • Şikayet: <b>{reports_count}</b></div>",
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                f"<div class='subtle'>Son şikayet: <b>{last_reported_at or '-'}</b></div>",
-                unsafe_allow_html=True
-            )
-            card_end()
-
-            # ✅ Kategori güncelleme geri geldi
-            card_start()
-            st.markdown("### Kategori güncelle")
-            new_cat = st.selectbox(
-                "Kategori",
-                CATEGORIES,
-                index=CATEGORIES.index(category) if category in CATEGORIES else len(CATEGORIES) - 1
-            )
-            if st.button("Kategoriyi Kaydet"):
-                set_category(_id, new_cat)
-                st.success("Kategori güncellendi.")
-            card_end()
-
-            # ✅ Şikayet ekleme geri geldi (B1 + A + D)
-            card_start()
-            st.markdown("### 🚨 Şikayet ekle")
-            rcol1, rcol2 = st.columns(2)
-            with rcol1:
-                report_type = st.selectbox("Tür", REPORT_TYPES, index=0)
-            with rcol2:
-                channel = st.selectbox("Kanal", CHANNELS, index=0)
-
-            message_excerpt = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: 'Bonus için linke tıkla...'")
-
-            if st.button("Şikayeti Kaydet", type="primary"):
-                if has_recent_report(_id, hours=24):
-                    st.warning("⚠️ Bu numara için son 24 saat içinde zaten şikayet eklenmiş.")
-                else:
-                    add_report(_id, report_type, channel, message_excerpt)
-                    new_cat2 = auto_update_category(_id)
-                    if new_cat2:
-                        st.info(f"📌 Otomatik kategori güncellendi: **{new_cat2}**")
-                    st.success("Şikayet kaydedildi. Skor güncellendi.")
-            card_end()
-
-            # ✅ Son şikayetler geri geldi
-            reps = get_reports(_id, limit=15)
-            card_start()
-            st.markdown("### Son şikayetler")
-            if not reps:
-                st.info("Henüz şikayet yok.")
-            else:
-                for rt, ch, msg, ts in reps:
-                    st.markdown(f"- **{rt}** / {ch}  \n  <small>{ts}</small>", unsafe_allow_html=True)
-                    if msg:
-                        st.markdown(f"<div class='subtle'>{msg}</div>", unsafe_allow_html=True)
-            card_end()
-
-
-# -------------------- TAB: Admin (PIN + Dashboard + Filtreler + CSV) --------------------
-with tab_admin:
-    if not st.session_state.get("is_admin", False):
-        card_start()
-        st.markdown("### 🔐 Admin girişi")
-        st.caption("Liste, dashboard ve CSV sadece admin için açık.")
-
-        pin = st.text_input("PIN", type="password", placeholder="4 haneli PIN")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            login = st.button("Giriş Yap", type="primary")
-        with col_b:
-            reset = st.button("Sıfırla")
-
-        if reset:
-            st.session_state["pin_tries"] = 0
-            st.rerun()
-
-        if login:
-            if pin == ADMIN_PIN:
-                st.session_state["is_admin"] = True
-                st.session_state["pin_tries"] = 0
-                st.success("Admin girişi başarılı.")
-                st.rerun()
-            else:
-                st.session_state["pin_tries"] += 1
-                st.error("Yanlış PIN.")
-                if st.session_state["pin_tries"] >= 5:
-                    st.warning("Çok fazla deneme yaptın. Bir süre sonra tekrar dene.")
-        card_end()
-
-    else:
-        top_l, top_r = st.columns([3, 1])
-        with top_l:
-            st.markdown("### 📊 Admin Panel")
-        with top_r:
-            if st.button("🚪 Admin çıkış", use_container_width=True):
-                st.session_state["is_admin"] = False
-                st.rerun()
-
-        # ✅ Dashboard (G)
-        total_numbers = get_total_numbers()
-        total_reports = get_total_reports()
-        reports_24h = get_reports_last_hours(24)
-        top_cat, top_cat_cnt = get_top_category()
-        top_risky = get_top_risky(5)
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            card_start()
-            st.markdown("**Toplam numara**")
-            st.markdown(f"## {total_numbers}")
-            card_end()
-        with c2:
-            card_start()
-            st.markdown("**Toplam şikayet**")
-            st.markdown(f"## {total_reports}")
-            card_end()
-        with c3:
-            card_start()
-            st.markdown("**Son 24 saat**")
-            st.markdown(f"## {reports_24h}")
-            card_end()
-
-        card_start()
-        st.markdown(f"**En çok şikayet alan tür:** {top_cat}  \n**Adet:** {top_cat_cnt}")
-        card_end()
-
-        card_start()
-        st.markdown("**En riskli 5 numara**")
-        if not top_risky:
-            st.info("Henüz kayıt yok.")
-        else:
-            for _id, phone, cat, last_ts, cnt in top_risky:
-                score = min(100, cnt * 15)
-                st.markdown(f"- **{phone}** — {cnt} şikayet — {score}/100 — {cat}")
-        card_end()
-
-        st.markdown("---")
-        st.markdown("### 🔎 Filtreli liste (CSV bu filtrelere göre iner)")
-
-        # ✅ CSV’den önce seçenekler (C) geri geldi
-        q = st.text_input("Telefonla ara", placeholder="örn: 532 veya +90532")
-        category_filter = st.selectbox("Kategori filtresi", ["Hepsi"] + CATEGORIES)
-        sort_by = st.selectbox(
-            "Sıralama",
-            ["Şikayet (Azalan)", "Şikayet (Artan)", "Son Şikayet (Yeni)", "Son Şikayet (Eski)"]
-        )
-        limit = st.slider("Kaç kayıt gösterilsin?", min_value=10, max_value=200, value=50, step=10)
-
-        rows = list_top_numbers(limit=limit, q=q.strip(), category=category_filter, sort_by=sort_by)
-
-        # ✅ CSV export (E) filtreli listeye göre
-        csv_header = "id,phone_number,category,last_reported_at,reports_count,score,risk_label\n"
-        csv_lines = [csv_header]
-        for _id, phone, cat, last_ts, cnt in rows:
-            score = min(100, cnt * 15)
-            label = risk_label(score)
-            last_ts_safe = (last_ts or "").replace(",", " ")
-            csv_lines.append(f"{_id},{phone},{cat},{last_ts_safe},{cnt},{score},{label}\n")
-        csv_data = "".join(csv_lines)
-
-        st.download_button(
-            label="⬇️ CSV indir (filtreli liste)",
-            data=csv_data.encode("utf-8"),
-            file_name="safeline_numbers.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-
-        if not rows:
-            st.info("Kriterlere uygun kayıt yok.")
-        else:
-            for _id, phone, cat, last_ts, cnt in rows:
-                score = min(100, cnt * 15)
-                card_start()
-                st.markdown(f"**{phone}**")
-                st.markdown(
-                    badge_html(f"{score}/100 • {risk_label(score)}", risk_color(score)),
-                    unsafe_allow_html=True
-                )
-                st.markdown(
-                    f"<div class='subtle'>Kategori: <b>{cat}</b> • Şikayet: <b>{cnt}</b> • Son: <b>{last_ts or '-'}</b></div>",
-                    unsafe_allow_html=True
-                )
-                if st.button(f"Bu numarayı aç → {phone}", key=f"open_{_id}"):
-                    st.session_state["current_number_id"] = _id
-                    st.rerun()
-                card_end()
+def get_top_category() -> tuple
