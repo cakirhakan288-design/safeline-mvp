@@ -528,13 +528,14 @@ with tab_query:
             )
             card_end()
 
-            # Kategori güncelleme
+            # Kategori güncelleme (manuel)
             card_start()
-            st.markdown("### Kategori güncelle")
+            st.markdown("### Kategori güncelle (manuel)")
             new_cat = st.selectbox(
                 "Kategori",
                 CATEGORIES,
-                index=CATEGORIES.index(category) if category in CATEGORIES else (len(CATEGORIES) - 1)
+                index=CATEGORIES.index(category) if category in CATEGORIES else (len(CATEGORIES) - 1),
+                key="manual_category_select"
             )
             if st.button("Kategoriyi Kaydet"):
                 set_category(_id, new_cat)
@@ -543,25 +544,50 @@ with tab_query:
                 st.rerun()
             card_end()
 
-            # Şikayet ekleme (B1 + A + D)
+            # Şikayet ekleme (B1 + yeni otomatik kategori davranışı)
             card_start()
             st.markdown("### 🚨 Şikayet ekle")
+
             rcol1, rcol2 = st.columns(2)
             with rcol1:
-                report_type = st.selectbox("Tür", REPORT_TYPES, index=0)
+                report_type = st.selectbox("Şikayet Türü", REPORT_TYPES, index=0, key="report_type_select")
             with rcol2:
-                channel = st.selectbox("Kanal", CHANNELS, index=0)
+                channel = st.selectbox("Kanal", CHANNELS, index=0, key="channel_select")
 
-            message_excerpt = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: 'Bonus için linke tıkla...'")
+            # ✅ Yeni: Şikayetle birlikte kategori seçimi (varsayılan otomatik)
+            category_options = ["Otomatik (Tür ile aynı)"] + CATEGORIES
+            default_idx = 0
+            chosen_category_mode = st.selectbox(
+                "Kategori (şikayetle birlikte)",
+                category_options,
+                index=default_idx,
+                help="Varsayılan: seçtiğin şikayet türü kategoriye otomatik yazılır. İstersen farklı seçebilirsin.",
+                key="report_category_mode"
+            )
+
+            message_excerpt = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: 'Bonus için linke tıkla...'", key="msg")
 
             if st.button("Şikayeti Kaydet", type="primary"):
                 if has_recent_report(_id, hours=24):
                     st.warning("⚠️ Bu numara için son 24 saat içinde zaten şikayet eklenmiş.")
                 else:
                     add_report(_id, report_type, channel, message_excerpt)
-                    new_cat2 = auto_update_category(_id)
-                    if new_cat2:
-                        st.info(f"📌 Otomatik kategori güncellendi: **{new_cat2}**")
+
+                    # ✅ İstenen davranış:
+                    # - Varsayılan: kategori = şikayet türü
+                    # - Kullanıcı farklı kategori seçtiyse onu yaz
+                    if chosen_category_mode == "Otomatik (Tür ile aynı)":
+                        set_category(_id, report_type)
+                        st.info(f"📌 Kategori şikayet türüne göre güncellendi: **{report_type}**")
+                    else:
+                        set_category(_id, chosen_category_mode)
+                        st.info(f"📌 Kategori manuel seçime göre güncellendi: **{chosen_category_mode}**")
+
+                    # (İstersen auto_update_category'yi tamamen kaldırabilirdik,
+                    # ama senin senaryonda artık kategori zaten belirleniyor.)
+                    # Yine de ekstra kural çalışsın istersen aşağıdaki satırı açabilirsin:
+                    # auto_update_category(_id)
+
                     st.success("Şikayet kaydedildi. Skor güncellendi.")
                     st.toast("✅ Şikayet kaydedildi", icon="✅")
                     st.rerun()
