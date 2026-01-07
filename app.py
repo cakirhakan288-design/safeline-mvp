@@ -8,6 +8,9 @@ import streamlit.components.v1 as components
 DB_PATH = "safeline.db"
 ADMIN_PIN = "2468"  # değiştir
 
+# 🔗 Buraya kendi Streamlit linkini yaz:
+APP_PUBLIC_URL = "https://safeline-mvp-idev9dt6u55ne4hfzejhxu.streamlit.app/"
+
 CATEGORIES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli", "Bilinmiyor"]
 REPORT_TYPES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli"]
 CHANNELS = ["Arama", "SMS", "WhatsApp", "Diğer"]
@@ -286,6 +289,29 @@ def post_admin_verified_to_wrapper():
         height=0,
     )
 
+def copy_to_clipboard_js(text: str):
+    safe = text.replace("\\", "\\\\").replace("`", "\\`").replace('"', '\\"')
+    components.html(
+        f"""
+        <script>
+        (async function() {{
+          try {{
+            await navigator.clipboard.writeText("{safe}");
+          }} catch(e) {{
+            // fallback
+            const t = document.createElement('textarea');
+            t.value = "{safe}";
+            document.body.appendChild(t);
+            t.select();
+            document.execCommand('copy');
+            document.body.removeChild(t);
+          }}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
 
 # ================= PAGE SETUP =================
 st.set_page_config(page_title="SafeLine AI", page_icon="🛡️", layout="centered")
@@ -296,13 +322,12 @@ if "is_admin" not in st.session_state:
 if "pin_tries" not in st.session_state:
     st.session_state["pin_tries"] = 0
 
-# ✅ Header'ı KAPATMIYORUZ → Share/Link/Refresh geri gelir
-# Sadece sol üst menüyü gizliyoruz (istersen bunu da kaldırabiliriz)
+# ✅ Header açık kalır (Streamlit’in Share düğmesi görünsün diye)
 st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
-.block-container { padding-top: .8rem; padding-bottom: 4.0rem; max-width: 820px; }
+.block-container { padding-top: .5rem; padding-bottom: 4.0rem; max-width: 860px; }
 .card {
   border: 1px solid rgba(49, 51, 63, 0.14);
   border-radius: 18px;
@@ -311,12 +336,10 @@ footer {visibility: hidden;}
   background: rgba(255,255,255,0.03);
 }
 .subtle { opacity: .82; font-size: .95rem; line-height: 1.35; }
-.stButton>button {
-  width: 100%;
-  border-radius: 16px;
-  padding: 0.90rem 1.0rem;
-  font-weight: 900;
-  font-size: 1.00rem;
+.smallbtn button{
+  border-radius: 14px !important;
+  padding: 0.55rem 0.7rem !important;
+  font-weight: 900 !important;
 }
 .stTextInput>div>div>input {
   border-radius: 16px;
@@ -332,10 +355,33 @@ footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🛡️ SafeLine AI")
+# ---------------- TOP ICON BAR ----------------
+st.markdown("### 🛡️ SafeLine AI")
+top_l, top_m, top_r = st.columns([1.3, 1.3, 1.6])
+with top_l:
+    st.markdown("<div class='smallbtn'>", unsafe_allow_html=True)
+    if st.button("🔗 Linki kopyala"):
+        # Streamlit URL + aktif tab paramı
+        current_tab = st.query_params.get("tab", "query")
+        current_tab = current_tab[0] if isinstance(current_tab, list) else current_tab
+        url = f"{APP_PUBLIC_URL}?tab={current_tab}"
+        copy_to_clipboard_js(url)
+        st.toast("Link kopyalandı ✅", icon="✅")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with top_m:
+    st.markdown("<div class='smallbtn'>", unsafe_allow_html=True)
+    if st.button("🔄 Yenile"):
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with top_r:
+    # Paylaş için: link açtırıyoruz (Streamlit Share yerine kendi)
+    st.link_button("↗️ Paylaş / Aç", APP_PUBLIC_URL, use_container_width=True)
+
 st.caption("Numara sorgula → risk gör → şikayet ekle (MVP)")
 
-# Navigation
+# -------- Navigation --------
 tab_param = st.query_params.get("tab", "query")
 tab_param = tab_param[0] if isinstance(tab_param, list) else tab_param
 default_nav = "Sorgula" if tab_param != "admin" else "Admin"
@@ -420,6 +466,7 @@ if nav == "Sorgula":
                 "Kategori (şikayetle birlikte)",
                 category_options,
                 index=0,
+                help="Varsayılan: seçtiğin şikayet türü kategoriye otomatik yazılır. İstersen farklı seçebilirsin.",
                 key="report_category_mode"
             )
             message_excerpt = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: 'Bonus için linke tıkla...'", key="msg")
@@ -548,21 +595,3 @@ else:
             mime="text/csv",
             use_container_width=True
         )
-
-        if not rows:
-            st.info("Kriterlere uygun kayıt yok.")
-        else:
-            for _id, phone, cat, last_ts, cnt in rows:
-                score = min(100, cnt * 15)
-                st.markdown("<div class='card'>", unsafe_allow_html=True)
-                st.markdown(f"**{phone}**", unsafe_allow_html=True)
-                st.markdown(badge_html(f"{score}/100 • {risk_label(score)}", risk_color(score)), unsafe_allow_html=True)
-                st.markdown(
-                    f"<div class='subtle'>Kategori: <b>{cat}</b> • Şikayet: <b>{cnt}</b> • Son: <b>{last_ts or '-'}</b></div>",
-                    unsafe_allow_html=True
-                )
-                if st.button(f"Bu numarayı aç → {phone}", key=f"open_{_id}"):
-                    st.session_state["current_number_id"] = _id
-                    st.query_params["tab"] = "query"
-                    st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
