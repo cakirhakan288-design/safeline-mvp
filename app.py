@@ -46,14 +46,12 @@ def now_utc_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 def normalize_phone(p: str) -> str:
-    """TR odaklı normalize (hedef: +905xxxxxxxxx)"""
     if not p:
         return ""
     s = "".join(ch for ch in p.strip() if ch.isdigit() or ch == "+")
     if s.count("+") > 1:
         s = "+" + s.replace("+", "")
 
-    # +90 / 90 / 0 / 5xxxxxxxxx
     digits = "".join(c for c in s if c.isdigit())
     if s.startswith("+90"):
         return "+90" + digits[2:]
@@ -81,15 +79,6 @@ def upsert_number(phone_number: str):
     if row:
         conn.close()
         return row
-
-    # normalize eşleştirme
-    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers")
-    for rid, rphone, rcat, rlast in cur.fetchall():
-        if normalize_phone(rphone) == canonical:
-            cur.execute("UPDATE numbers SET phone_number=? WHERE id=?", (canonical, rid))
-            conn.commit()
-            conn.close()
-            return (rid, canonical, rcat, rlast)
 
     cur.execute("INSERT INTO numbers (phone_number, category, last_reported_at) VALUES (?, ?, ?)",
                 (canonical, "Bilinmiyor", None))
@@ -129,7 +118,6 @@ def add_report(number_id: int, report_type: str, channel: str, message_excerpt: 
 def has_recent_report(number_id: int, hours: int = 24) -> bool:
     conn = get_conn()
     cur = conn.cursor()
-    # ISO string compare çoğu durumda çalışır ama sqlite datetime ile daha güvenli
     cur.execute("""
         SELECT COUNT(*)
         FROM reports
@@ -162,6 +150,7 @@ def get_stats(number_id: int):
     conn.close()
     score = min(100, reports_count * 15)
     return reports_count, score
+
 
 # ================= ADMIN QUERIES =================
 def list_top_numbers(limit: int = 50, q: str = "", category: str = "Hepsi", sort_by: str = "Şikayet (Azalan)"):
@@ -232,7 +221,6 @@ def get_reports_last_hours(hours: int = 24) -> int:
     return n
 
 def get_reports_by_day(days: int = 30) -> pd.DataFrame:
-    """Son N gün: gün bazında şikayet adedi"""
     conn = get_conn()
     df = pd.read_sql_query(f"""
         SELECT date(created_at) AS day, COUNT(*) AS reports
@@ -243,14 +231,12 @@ def get_reports_by_day(days: int = 30) -> pd.DataFrame:
     """, conn)
     conn.close()
     if df.empty:
-        # eksen düzgün görünsün
         return pd.DataFrame({"day": [], "reports": []})
     df["day"] = pd.to_datetime(df["day"])
     df = df.set_index("day")
     return df
 
 def get_distribution(field: str, days: int = 30) -> pd.DataFrame:
-    """report_type veya channel dağılımı"""
     if field not in ("report_type", "channel"):
         return pd.DataFrame({"name": [], "count": []})
     conn = get_conn()
@@ -263,6 +249,7 @@ def get_distribution(field: str, days: int = 30) -> pd.DataFrame:
     """, conn)
     conn.close()
     return df
+
 
 # ================= UI HELPERS =================
 def risk_label(score: int) -> str:
@@ -295,14 +282,10 @@ def badge_html(text: str, bg: str) -> str:
     """
 
 def post_admin_verified_to_wrapper():
-    """PWA wrapper (index.html) dinliyorsa localStorage set etsin diye mesaj gönder."""
     components.html(
         """
         <script>
-          try {
-            // Wrapper iframe içinden parent'a mesaj
-            window.parent.postMessage("ADMIN_VERIFIED", "*");
-          } catch(e) {}
+          try { window.parent.postMessage("ADMIN_VERIFIED", "*"); } catch(e) {}
         </script>
         """,
         height=0,
@@ -313,13 +296,19 @@ def post_admin_verified_to_wrapper():
 st.set_page_config(page_title="SafeLine AI", page_icon="🛡️", layout="centered")
 init_db()
 
-# Mobil hissi
+# State
+if "is_admin" not in st.session_state:
+    st.session_state["is_admin"] = False
+if "pin_tries" not in st.session_state:
+    st.session_state["pin_tries"] = 0
+
+# Mobile feel
 st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 header {visibility: hidden;}
-.block-container { padding-top: .8rem; padding-bottom: 5.0rem; max-width: 820px; }
+.block-container { padding-top: .8rem; padding-bottom: 4.0rem; max-width: 820px; }
 .card {
   border: 1px solid rgba(49, 51, 63, 0.14);
   border-radius: 18px;
@@ -346,33 +335,29 @@ header {visibility: hidden;}
   font-size: 1.00rem;
 }
 [data-baseweb="select"] > div { border-radius: 16px !important; }
-.stTabs [data-baseweb="tab-list"] { gap: 8px; overflow-x: auto; padding-bottom: 6px; }
-.stTabs [data-baseweb="tab"] { border-radius: 999px; padding: 10px 14px; font-weight: 900; white-space: nowrap; }
-@media (max-width: 640px) {
-  .block-container { padding-left: 0.75rem; padding-right: 0.75rem; max-width: 100%; }
-  .card { border-radius: 16px; padding: 12px; }
-}
 </style>
 """, unsafe_allow_html=True)
-
-if "is_admin" not in st.session_state:
-    st.session_state["is_admin"] = False
-if "pin_tries" not in st.session_state:
-    st.session_state["pin_tries"] = 0
 
 st.title("🛡️ SafeLine AI")
 st.caption("Numara sorgula → risk gör → şikayet ekle (MVP)")
 
-# ---- Query param ile sekme aç ----
+# -------- Navigation (query param destekli) --------
 tab_param = st.query_params.get("tab", "query")
 tab_param = tab_param[0] if isinstance(tab_param, list) else tab_param
-default_tab_index = 0 if tab_param != "admin" else 1
+default_nav = "Sorgula" if tab_param != "admin" else "Admin"
 
-tab_query, tab_admin = st.tabs(["🔎 Sorgula", "📊 Admin"], index=default_tab_index)
+nav = st.radio(
+    "Menü",
+    ["Sorgula", "Admin"],
+    index=0 if default_nav == "Sorgula" else 1,
+    horizontal=True,
+    label_visibility="collapsed"
+)
+st.query_params["tab"] = "query" if nav == "Sorgula" else "admin"
 
 
-# ================= TAB: SORGULA =================
-with tab_query:
+# ================= VIEW: SORGULA =================
+if nav == "Sorgula":
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.markdown("### Telefon numarası")
     with st.form("lookup_form", clear_on_submit=False):
@@ -482,8 +467,8 @@ with tab_query:
             st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ================= TAB: ADMIN + DASHBOARD =================
-with tab_admin:
+# ================= VIEW: ADMIN + DASHBOARD =================
+else:
     if not st.session_state.get("is_admin", False):
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("### 🔐 Admin girişi")
@@ -504,7 +489,6 @@ with tab_admin:
             if pin == ADMIN_PIN:
                 st.session_state["is_admin"] = True
                 st.session_state["pin_tries"] = 0
-                # ✅ Wrapper’a mesaj (FaceID hissi için)
                 post_admin_verified_to_wrapper()
                 st.success("Admin girişi başarılı.")
                 st.rerun()
@@ -513,7 +497,6 @@ with tab_admin:
                 st.error("Yanlış PIN.")
                 if st.session_state["pin_tries"] >= 5:
                     st.warning("Çok fazla deneme yaptın. Bir süre sonra tekrar dene.")
-
         st.markdown("</div>", unsafe_allow_html=True)
 
     else:
@@ -525,37 +508,29 @@ with tab_admin:
                 st.session_state["is_admin"] = False
                 st.rerun()
 
-        # ---- KPI ----
         total_numbers = get_total_numbers()
         total_reports = get_total_reports()
         reports_24h = get_reports_last_hours(24)
         reports_7d = get_reports_last_hours(24 * 7)
 
         k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            st.metric("Toplam Numara", total_numbers)
-        with k2:
-            st.metric("Toplam Şikayet", total_reports)
-        with k3:
-            st.metric("Son 24 Saat", reports_24h)
-        with k4:
-            st.metric("Son 7 Gün", reports_7d)
+        k1.metric("Toplam Numara", total_numbers)
+        k2.metric("Toplam Şikayet", total_reports)
+        k3.metric("Son 24 Saat", reports_24h)
+        k4.metric("Son 7 Gün", reports_7d)
 
-        # ---- Trend Chart ----
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("#### Şikayet Trend (Son 30 gün)")
         df30 = get_reports_by_day(30)
         if df30.empty:
             st.info("Henüz yeterli veri yok.")
         else:
-            # eksik günleri doldur
             start = (datetime.now(timezone.utc) - timedelta(days=29)).date()
             idx = pd.date_range(start=start, periods=30, freq="D")
             df30 = df30.reindex(idx, fill_value=0)
             st.line_chart(df30, height=220)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # ---- Distributions ----
         cL, cR = st.columns(2)
         with cL:
             st.markdown("<div class='card'>", unsafe_allow_html=True)
@@ -564,8 +539,7 @@ with tab_admin:
             if dist_type.empty:
                 st.info("Veri yok.")
             else:
-                dist_type = dist_type.set_index("name")
-                st.bar_chart(dist_type, height=220)
+                st.bar_chart(dist_type.set_index("name"), height=220)
             st.markdown("</div>", unsafe_allow_html=True)
 
         with cR:
@@ -575,11 +549,9 @@ with tab_admin:
             if dist_ch.empty:
                 st.info("Veri yok.")
             else:
-                dist_ch = dist_ch.set_index("name")
-                st.bar_chart(dist_ch, height=220)
+                st.bar_chart(dist_ch.set_index("name"), height=220)
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ---- Top risky list ----
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("#### En riskli 10 numara")
         top10 = list_top_numbers(limit=10, q="", category="Hepsi", sort_by="Şikayet (Azalan)")
@@ -604,7 +576,6 @@ with tab_admin:
 
         rows = list_top_numbers(limit=limit, q=q.strip(), category=category_filter, sort_by=sort_by)
 
-        # CSV (filtreli)
         csv_header = "id,phone_number,category,last_reported_at,reports_count,score,risk_label\n"
         csv_lines = [csv_header]
         for _id, phone, cat, last_ts, cnt in rows:
