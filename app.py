@@ -1,21 +1,18 @@
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 # ================= CONFIG =================
 DB_PATH = "whooops.db"
 ADMIN_PIN = "2468"  # değiştir
-
-# 🔗 Streamlit public URL (kopyalama/paylaşma için)
-APP_PUBLIC_URL = "https://safeline-mvp-idev9dt6u55ne4hfzejhxu.streamlit.app/"
 
 APP_NAME = "WhoOops"
 
 CATEGORIES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli", "Bilinmiyor"]
 REPORT_TYPES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli"]
 CHANNELS = ["Arama", "SMS", "WhatsApp", "Diğer"]
+
 
 # ================= DB =================
 def get_conn():
@@ -53,8 +50,11 @@ def normalize_phone(p: str) -> str:
     if not p:
         return ""
     digits = "".join(c for c in p if c.isdigit())
+    if not digits:
+        return ""
     if digits.startswith("0"):
         digits = digits[1:]
+    # TR odaklı basit normalize
     if len(digits) == 10:
         return "+90" + digits
     if digits.startswith("90"):
@@ -137,7 +137,6 @@ def get_stats(number_id: int):
     score = min(100, cnt * 15)
     return cnt, score
 
-# ================= ADMIN =================
 def list_numbers():
     conn = get_conn()
     cur = conn.cursor()
@@ -166,6 +165,7 @@ def get_total_reports():
     n = cur.fetchone()[0]
     conn.close()
     return n
+
 
 # ================= UI HELPERS =================
 def risk_label(score):
@@ -196,8 +196,9 @@ def badge(text, color):
     </span>
     """
 
+
 # ================= PAGE =================
-st.set_page_config(page_title=APP_NAME, page_icon="😅", layout="centered")
+st.set_page_config(page_title=APP_NAME, page_icon="🛡️", layout="centered")
 init_db()
 
 st.markdown(
@@ -205,6 +206,9 @@ st.markdown(
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
+
+    .block-container { padding-top: 0.8rem; max-width: 880px; }
+
     .card {
         border-radius:18px;
         padding:16px;
@@ -212,24 +216,51 @@ st.markdown(
         margin-bottom:14px;
         border:1px solid rgba(255,255,255,0.08);
     }
+
+    /* input daha bariz olsun */
+    .stTextInput input {
+        border-radius: 14px !important;
+        padding: 0.9rem 1rem !important;
+        font-size: 1.05rem !important;
+    }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-st.title("😅 WhoOops")
+# ✅ Logo benzeri üst başlık (kalkan)
+st.markdown(f"## 🛡️ {APP_NAME}")
 st.caption("Oops demeden önce kontrol et.")
 
-tab = st.radio("", ["🔍 Sorgula", "📊 Admin"], horizontal=True)
+# Tab seçimi (buradaki label boşluğu da kafa karıştırmasın diye label verdim)
+tab = st.radio("Menü", ["🔍 Sorgula", "📊 Admin"], horizontal=True, label_visibility="collapsed")
+
 
 # ================= SORGULA =================
 if tab == "🔍 Sorgula":
     st.markdown("<div class='card'>", unsafe_allow_html=True)
-    phone = st.text_input("Telefon Numarası", placeholder="0532... veya +90...")
-    if st.button("Numarayı Kontrol Et"):
-        row = upsert_number(phone)
-        if row:
-            st.session_state["nid"] = row[0]
+
+    # ✅ Başlığı ayrı gösteriyoruz (araya “tıklanabilir bar” hissi veren label boşluğu kalmasın)
+    st.markdown("### Telefon numarası")
+    phone = st.text_input(
+        label="Telefon numarası",
+        placeholder="0532... veya +90...",
+        label_visibility="collapsed"
+    )
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("Numarayı kontrol et", use_container_width=True):
+            row = upsert_number(phone)
+            if row:
+                st.session_state["nid"] = row[0]
+            else:
+                st.error("Lütfen geçerli bir numara gir.")
+    with col2:
+        if st.button("Temizle", use_container_width=True):
+            st.session_state.pop("nid", None)
+            st.rerun()
+
     st.markdown("</div>", unsafe_allow_html=True)
 
     if "nid" in st.session_state:
@@ -241,14 +272,15 @@ if tab == "🔍 Sorgula":
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        rtype = st.selectbox("Şikayet Türü", REPORT_TYPES)
+        st.markdown("### 🚨 Şikayet ekle")
+        rtype = st.selectbox("Şikayet türü", REPORT_TYPES)
         channel = st.selectbox("Kanal", CHANNELS)
         cat_mode = st.selectbox("Kategori", ["Otomatik (Tür ile aynı)"] + CATEGORIES)
-        msg = st.text_area("Açıklama (opsiyonel)")
+        msg = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: Bonus linki attı / IBAN istedi / vb.")
 
-        if st.button("Şikayet Ekle"):
+        if st.button("Şikayet ekle", type="primary", use_container_width=True):
             if has_recent_report(nid):
-                st.warning("Bu numara için son 24 saatte şikayet var.")
+                st.warning("Bu numara için son 24 saatte zaten şikayet var.")
             else:
                 add_report(nid, rtype, channel, msg)
                 set_category(nid, rtype if cat_mode.startswith("Otomatik") else cat_mode)
@@ -257,10 +289,17 @@ if tab == "🔍 Sorgula":
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.subheader("Son Şikayetler")
-        for r in get_reports(nid):
-            st.write(r)
+        st.markdown("### Son şikayetler")
+        reps = get_reports(nid)
+        if not reps:
+            st.info("Henüz şikayet yok.")
+        else:
+            for rt, ch, m, ts in reps:
+                st.markdown(f"- **{rt}** / {ch} — {ts}")
+                if m:
+                    st.caption(m)
         st.markdown("</div>", unsafe_allow_html=True)
+
 
 # ================= ADMIN =================
 else:
@@ -268,22 +307,31 @@ else:
         st.session_state["admin"] = False
 
     if not st.session_state["admin"]:
-        pin = st.text_input("Admin PIN", type="password")
-        if st.button("Giriş"):
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.markdown("### 🔐 Admin girişi")
+        pin = st.text_input("Admin PIN", type="password", label_visibility="collapsed", placeholder="PIN")
+        if st.button("Giriş", type="primary", use_container_width=True):
             if pin == ADMIN_PIN:
                 st.session_state["admin"] = True
                 st.success("Hoş geldin 👋")
+                st.rerun()
             else:
                 st.error("Yanlış PIN")
+        st.markdown("</div>", unsafe_allow_html=True)
     else:
-        if st.button("🚪 Çıkış"):
-            st.session_state["admin"] = False
-            st.rerun()
+        colA, colB = st.columns([2, 1])
+        with colA:
+            st.markdown("### 📊 Admin paneli")
+        with colB:
+            if st.button("🚪 Çıkış", use_container_width=True):
+                st.session_state["admin"] = False
+                st.rerun()
 
-        st.metric("Toplam Numara", get_total_numbers())
-        st.metric("Toplam Şikayet", get_total_reports())
+        st.metric("Toplam numara", get_total_numbers())
+        st.metric("Toplam şikayet", get_total_reports())
 
         rows = list_numbers()
+
         csv = "phone,category,count\n"
         for r in rows:
             csv += f"{r[1]},{r[2]},{r[3]}\n"
@@ -292,8 +340,12 @@ else:
             "⬇️ CSV indir",
             csv,
             "whooops_data.csv",
-            mime="text/csv"
+            mime="text/csv",
+            use_container_width=True
         )
 
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.markdown("### Liste")
         for r in rows:
             st.write(r)
+        st.markdown("</div>", unsafe_allow_html=True)
