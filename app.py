@@ -1,10 +1,17 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ================= CONFIG =================
-DB_PATH = "safeline.db"
-ADMIN_PIN = "2468"
+DB_PATH = "whooops.db"
+ADMIN_PIN = "2468"  # değiştir
+
+# 🔗 Streamlit public URL (kopyalama/paylaşma için)
+APP_PUBLIC_URL = "https://safeline-mvp-idev9dt6u55ne4hfzejhxu.streamlit.app/"
+
+APP_NAME = "WhoOops"
 
 CATEGORIES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli", "Bilinmiyor"]
 REPORT_TYPES = ["Dolandırıcılık", "Bahis", "Şüpheli", "Güvenli"]
@@ -20,89 +27,94 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS numbers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone_number TEXT UNIQUE,
-            category TEXT DEFAULT 'Bilinmiyor',
+            phone_number TEXT UNIQUE NOT NULL,
+            category TEXT NOT NULL DEFAULT 'Bilinmiyor',
             last_reported_at TEXT
         )
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            number_id INTEGER,
-            report_type TEXT,
-            channel TEXT,
+            number_id INTEGER NOT NULL,
+            report_type TEXT NOT NULL,
+            channel TEXT NOT NULL,
             message_excerpt TEXT,
-            created_at TEXT
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(number_id) REFERENCES numbers(id)
         )
     """)
     conn.commit()
     conn.close()
 
-# ================= HELPERS =================
-def normalize_phone(p):
+def now_utc_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+def normalize_phone(p: str) -> str:
     if not p:
         return ""
-    d = "".join(c for c in p if c.isdigit())
-    if d.startswith("0"):
-        d = d[1:]
-    if len(d) == 10:
-        return "+90" + d
-    if d.startswith("90"):
-        return "+" + d
-    return "+" + d
+    digits = "".join(c for c in p if c.isdigit())
+    if digits.startswith("0"):
+        digits = digits[1:]
+    if len(digits) == 10:
+        return "+90" + digits
+    if digits.startswith("90"):
+        return "+" + digits
+    return "+" + digits
 
-def upsert_number(phone):
-    phone = normalize_phone(phone)
+def upsert_number(phone_number: str):
+    canonical = normalize_phone(phone_number)
+    if not canonical:
+        return None
+
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM numbers WHERE phone_number=?", (phone,))
+    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
     row = cur.fetchone()
     if row:
         conn.close()
         return row
+
     cur.execute(
-        "INSERT INTO numbers (phone_number, category) VALUES (?,?)",
-        (phone, "Bilinmiyor")
+        "INSERT INTO numbers (phone_number, category) VALUES (?, ?)",
+        (canonical, "Bilinmiyor")
     )
     conn.commit()
-    cur.execute("SELECT * FROM numbers WHERE phone_number=?", (phone,))
+    cur.execute("SELECT id, phone_number, category, last_reported_at FROM numbers WHERE phone_number = ?", (canonical,))
     row = cur.fetchone()
     conn.close()
     return row
 
-def has_recent_report(number_id):
+def set_category(number_id: int, category: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE numbers SET category=? WHERE id=?", (category, number_id))
+    conn.commit()
+    conn.close()
+
+def add_report(number_id: int, report_type: str, channel: str, message: str | None):
+    conn = get_conn()
+    cur = conn.cursor()
+    ts = now_utc_iso()
+    cur.execute("""
+        INSERT INTO reports (number_id, report_type, channel, message_excerpt, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (number_id, report_type, channel, message, ts))
+    cur.execute("UPDATE numbers SET last_reported_at=? WHERE id=?", (ts, number_id))
+    conn.commit()
+    conn.close()
+
+def has_recent_report(number_id: int, hours: int = 24):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT COUNT(*) FROM reports
-        WHERE number_id=?
-        AND datetime(created_at) >= datetime('now','-24 hours')
-    """, (number_id,))
-    r = cur.fetchone()[0]
+        WHERE number_id=? AND datetime(created_at) >= datetime('now', ?)
+    """, (number_id, f"-{hours} hours"))
+    c = cur.fetchone()[0]
     conn.close()
-    return r > 0
+    return c > 0
 
-def add_report(number_id, report_type, channel, msg):
-    now = datetime.utcnow().isoformat()
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO reports (number_id, report_type, channel, message_excerpt, created_at)
-        VALUES (?,?,?,?,?)
-    """, (number_id, report_type, channel, msg, now))
-    cur.execute("UPDATE numbers SET last_reported_at=? WHERE id=?", (now, number_id))
-    conn.commit()
-    conn.close()
-
-def get_stats(number_id):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM reports WHERE number_id=?", (number_id,))
-    cnt = cur.fetchone()[0]
-    conn.close()
-    return cnt, min(100, cnt * 15)
-
-def get_reports(number_id, limit=15):
+def get_reports(number_id: int, limit: int = 15):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -116,12 +128,14 @@ def get_reports(number_id, limit=15):
     conn.close()
     return rows
 
-def set_category(number_id, category):
+def get_stats(number_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("UPDATE numbers SET category=? WHERE id=?", (category, number_id))
-    conn.commit()
+    cur.execute("SELECT COUNT(*) FROM reports WHERE number_id=?", (number_id,))
+    cnt = cur.fetchone()[0]
     conn.close()
+    score = min(100, cnt * 15)
+    return cnt, score
 
 # ================= ADMIN =================
 def list_numbers():
@@ -141,102 +155,145 @@ def get_total_numbers():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM numbers")
-    r = cur.fetchone()[0]
+    n = cur.fetchone()[0]
     conn.close()
-    return r
+    return n
 
 def get_total_reports():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM reports")
-    r = cur.fetchone()[0]
+    n = cur.fetchone()[0]
     conn.close()
-    return r
+    return n
+
+# ================= UI HELPERS =================
+def risk_label(score):
+    if score >= 61:
+        return "Yüksek Risk"
+    if score >= 31:
+        return "Şüpheli"
+    return "Düşük Risk"
+
+def risk_color(score):
+    if score >= 61:
+        return "#ef4444"
+    if score >= 31:
+        return "#f59e0b"
+    return "#22c55e"
+
+def badge(text, color):
+    return f"""
+    <span style="
+    background:{color};
+    color:white;
+    padding:6px 12px;
+    border-radius:999px;
+    font-weight:900;
+    font-size:13px;
+    ">
+    {text}
+    </span>
+    """
 
 # ================= PAGE =================
-st.set_page_config(page_title="SafeLine AI", page_icon="🛡️", layout="centered")
+st.set_page_config(page_title=APP_NAME, page_icon="😅", layout="centered")
 init_db()
 
-# -------- Query param ile sekme seçimi --------
-params = st.query_params
-default_tab = params.get("tab", ["query"])[0]
+st.markdown(
+    """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    .card {
+        border-radius:18px;
+        padding:16px;
+        background:rgba(255,255,255,0.04);
+        margin-bottom:14px;
+        border:1px solid rgba(255,255,255,0.08);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
-if "active_tab" not in st.session_state:
-    st.session_state.active_tab = default_tab
+st.title("😅 WhoOops")
+st.caption("Oops demeden önce kontrol et.")
 
-st.title("🛡️ SafeLine AI")
+tab = st.radio("", ["🔍 Sorgula", "📊 Admin"], horizontal=True)
 
-tab_query, tab_admin = st.tabs(["🔍 Sorgula", "📊 Admin"])
-
-# ================= TAB: SORGULA =================
-with tab_query:
-    if st.session_state.active_tab != "query":
-        st.session_state.active_tab = "query"
-
-    phone = st.text_input("Telefon numarası", placeholder="0532... veya +90...")
-    if st.button("Sorgula"):
+# ================= SORGULA =================
+if tab == "🔍 Sorgula":
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    phone = st.text_input("Telefon Numarası", placeholder="0532... veya +90...")
+    if st.button("Numarayı Kontrol Et"):
         row = upsert_number(phone)
-        st.session_state.num_id = row[0]
+        if row:
+            st.session_state["nid"] = row[0]
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    if "num_id" in st.session_state:
-        num_id = st.session_state.num_id
-        cnt, score = get_stats(num_id)
-        st.metric("Risk Skoru", score)
+    if "nid" in st.session_state:
+        nid = st.session_state["nid"]
+        cnt, score = get_stats(nid)
 
-        st.subheader("🚨 Şikayet ekle")
-        report_type = st.selectbox("Şikayet türü", REPORT_TYPES)
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.markdown(badge(f"{score}/100 • {risk_label(score)}", risk_color(score)), unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        rtype = st.selectbox("Şikayet Türü", REPORT_TYPES)
         channel = st.selectbox("Kanal", CHANNELS)
-        category_mode = st.selectbox(
-            "Kategori",
-            ["Otomatik (Tür ile aynı)"] + CATEGORIES
-        )
+        cat_mode = st.selectbox("Kategori", ["Otomatik (Tür ile aynı)"] + CATEGORIES)
         msg = st.text_area("Açıklama (opsiyonel)")
 
-        if st.button("Şikayeti Kaydet"):
-            if has_recent_report(num_id):
-                st.warning("24 saat içinde zaten şikayet var")
+        if st.button("Şikayet Ekle"):
+            if has_recent_report(nid):
+                st.warning("Bu numara için son 24 saatte şikayet var.")
             else:
-                add_report(num_id, report_type, channel, msg)
-                if category_mode == "Otomatik (Tür ile aynı)":
-                    set_category(num_id, report_type)
-                else:
-                    set_category(num_id, category_mode)
-                st.success("Şikayet kaydedildi")
+                add_report(nid, rtype, channel, msg)
+                set_category(nid, rtype if cat_mode.startswith("Otomatik") else cat_mode)
+                st.success("Şikayet eklendi.")
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        st.subheader("Son şikayetler")
-        for r in get_reports(num_id):
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.subheader("Son Şikayetler")
+        for r in get_reports(nid):
             st.write(r)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-# ================= TAB: ADMIN =================
-with tab_admin:
-    if st.session_state.active_tab != "admin":
-        st.session_state.active_tab = "admin"
-
+# ================= ADMIN =================
+else:
     if "admin" not in st.session_state:
-        st.session_state.admin = False
+        st.session_state["admin"] = False
 
-    if not st.session_state.admin:
+    if not st.session_state["admin"]:
         pin = st.text_input("Admin PIN", type="password")
         if st.button("Giriş"):
             if pin == ADMIN_PIN:
-                st.session_state.admin = True
-                st.success("Giriş başarılı")
+                st.session_state["admin"] = True
+                st.success("Hoş geldin 👋")
             else:
                 st.error("Yanlış PIN")
     else:
         if st.button("🚪 Çıkış"):
-            st.session_state.admin = False
+            st.session_state["admin"] = False
             st.rerun()
 
-        st.metric("Toplam numara", get_total_numbers())
-        st.metric("Toplam şikayet", get_total_reports())
+        st.metric("Toplam Numara", get_total_numbers())
+        st.metric("Toplam Şikayet", get_total_reports())
 
         rows = list_numbers()
         csv = "phone,category,count\n"
         for r in rows:
             csv += f"{r[1]},{r[2]},{r[3]}\n"
 
-        st.download_button("CSV indir", csv, "safeline.csv")
+        st.download_button(
+            "⬇️ CSV indir",
+            csv,
+            "whooops_data.csv",
+            mime="text/csv"
+        )
 
         for r in rows:
             st.write(r)
