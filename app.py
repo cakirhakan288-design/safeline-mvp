@@ -1,6 +1,5 @@
 import sqlite3
 from datetime import datetime, timezone
-import pandas as pd
 import streamlit as st
 
 # ================= CONFIG =================
@@ -49,7 +48,7 @@ def now_utc_iso():
 def normalize_phone(p: str) -> str:
     if not p:
         return ""
-    digits = "".join(c for c in p if c.isdigit())
+    digits = "".join(c for c in p.strip() if c.isdigit())
     if not digits:
         return ""
     if digits.startswith("0"):
@@ -142,9 +141,10 @@ def list_numbers():
     cur = conn.cursor()
     cur.execute("""
         SELECT n.id, n.phone_number, n.category,
-        (SELECT COUNT(*) FROM reports r WHERE r.number_id=n.id) cnt
+        (SELECT COUNT(*) FROM reports r WHERE r.number_id=n.id) cnt,
+        n.last_reported_at
         FROM numbers n
-        ORDER BY cnt DESC
+        ORDER BY cnt DESC, n.last_reported_at DESC
     """)
     rows = cur.fetchall()
     conn.close()
@@ -168,31 +168,32 @@ def get_total_reports():
 
 
 # ================= UI HELPERS =================
-def risk_label(score):
+def risk_label(score: int) -> str:
     if score >= 61:
         return "Yüksek Risk"
     if score >= 31:
         return "Şüpheli"
     return "Düşük Risk"
 
-def risk_color(score):
+def risk_color(score: int) -> str:
     if score >= 61:
         return "#ef4444"
     if score >= 31:
         return "#f59e0b"
     return "#22c55e"
 
-def badge(text, color):
+def badge(text: str, color: str) -> str:
     return f"""
     <span style="
-    background:{color};
-    color:white;
-    padding:6px 12px;
-    border-radius:999px;
-    font-weight:900;
-    font-size:13px;
+        background:{color};
+        color:white;
+        padding:6px 12px;
+        border-radius:999px;
+        font-weight:900;
+        font-size:13px;
+        display:inline-block;
     ">
-    {text}
+        {text}
     </span>
     """
 
@@ -201,13 +202,18 @@ def badge(text, color):
 st.set_page_config(page_title=APP_NAME, page_icon="🛡️", layout="centered")
 init_db()
 
+# ✅ Üst bar çakışmasını çözen CSS
 st.markdown(
     """
     <style>
+    /* Streamlit üst header boşluğunu kaldır (çakışmayı bitirir) */
+    header[data-testid="stHeader"] { display: none; }
+
+    /* içerik biraz aşağı insin */
+    .block-container { padding-top: 1.8rem !important; max-width: 900px; }
+
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-
-    .block-container { padding-top: 0.8rem; max-width: 880px; }
 
     .card {
         border-radius:18px;
@@ -217,22 +223,46 @@ st.markdown(
         border:1px solid rgba(255,255,255,0.08);
     }
 
-    /* input daha bariz olsun */
+    /* input daha belirgin */
     .stTextInput input {
         border-radius: 14px !important;
         padding: 0.9rem 1rem !important;
         font-size: 1.05rem !important;
+    }
+
+    .stTextArea textarea {
+        border-radius: 14px !important;
+        padding: 0.8rem 1rem !important;
     }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# ✅ Logo benzeri üst başlık (kalkan)
-st.markdown(f"## 🛡️ {APP_NAME}")
+# ✅ Özel header (kalkan + isim)
+st.markdown(
+    f"""
+    <div style="
+        display:flex;
+        align-items:center;
+        gap:10px;
+        margin-bottom:6px;
+        margin-top:6px;
+    ">
+        <span style="font-size:34px;">🛡️</span>
+        <span style="
+            font-size:32px;
+            font-weight:900;
+            letter-spacing:-0.5px;
+        ">
+            {APP_NAME}
+        </span>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 st.caption("Oops demeden önce kontrol et.")
 
-# Tab seçimi (buradaki label boşluğu da kafa karıştırmasın diye label verdim)
 tab = st.radio("Menü", ["🔍 Sorgula", "📊 Admin"], horizontal=True, label_visibility="collapsed")
 
 
@@ -240,10 +270,10 @@ tab = st.radio("Menü", ["🔍 Sorgula", "📊 Admin"], horizontal=True, label_v
 if tab == "🔍 Sorgula":
     st.markdown("<div class='card'>", unsafe_allow_html=True)
 
-    # ✅ Başlığı ayrı gösteriyoruz (araya “tıklanabilir bar” hissi veren label boşluğu kalmasın)
+    # ✅ Aradaki “tıklanabilir bar” hissini bitirmek için label gizlendi
     st.markdown("### Telefon numarası")
     phone = st.text_input(
-        label="Telefon numarası",
+        "Telefon numarası",
         placeholder="0532... veya +90...",
         label_visibility="collapsed"
     )
@@ -269,13 +299,21 @@ if tab == "🔍 Sorgula":
 
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown(badge(f"{score}/100 • {risk_label(score)}", risk_color(score)), unsafe_allow_html=True)
+        st.markdown(f"<div style='opacity:.82;margin-top:8px'>Şikayet sayısı: <b>{cnt}</b></div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("### 🚨 Şikayet ekle")
+
         rtype = st.selectbox("Şikayet türü", REPORT_TYPES)
         channel = st.selectbox("Kanal", CHANNELS)
-        cat_mode = st.selectbox("Kategori", ["Otomatik (Tür ile aynı)"] + CATEGORIES)
+
+        cat_mode = st.selectbox(
+            "Kategori",
+            ["Otomatik (Tür ile aynı)"] + CATEGORIES,
+            help="Varsayılan: kategori = şikayet türü. İstersen farklı seçebilirsin."
+        )
+
         msg = st.text_area("Açıklama (opsiyonel)", placeholder="Örn: Bonus linki attı / IBAN istedi / vb.")
 
         if st.button("Şikayet ekle", type="primary", use_container_width=True):
@@ -286,6 +324,7 @@ if tab == "🔍 Sorgula":
                 set_category(nid, rtype if cat_mode.startswith("Otomatik") else cat_mode)
                 st.success("Şikayet eklendi.")
                 st.rerun()
+
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='card'>", unsafe_allow_html=True)
@@ -309,7 +348,7 @@ else:
     if not st.session_state["admin"]:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("### 🔐 Admin girişi")
-        pin = st.text_input("Admin PIN", type="password", label_visibility="collapsed", placeholder="PIN")
+        pin = st.text_input("PIN", type="password", label_visibility="collapsed", placeholder="PIN")
         if st.button("Giriş", type="primary", use_container_width=True):
             if pin == ADMIN_PIN:
                 st.session_state["admin"] = True
@@ -318,6 +357,7 @@ else:
             else:
                 st.error("Yanlış PIN")
         st.markdown("</div>", unsafe_allow_html=True)
+
     else:
         colA, colB = st.columns([2, 1])
         with colA:
@@ -327,18 +367,21 @@ else:
                 st.session_state["admin"] = False
                 st.rerun()
 
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.metric("Toplam numara", get_total_numbers())
         st.metric("Toplam şikayet", get_total_reports())
+        st.markdown("</div>", unsafe_allow_html=True)
 
         rows = list_numbers()
 
-        csv = "phone,category,count\n"
+        # CSV (basit)
+        csv = "phone,category,count,last_reported_at\n"
         for r in rows:
-            csv += f"{r[1]},{r[2]},{r[3]}\n"
+            csv += f"{r[1]},{r[2]},{r[3]},{(r[4] or '')}\n"
 
         st.download_button(
             "⬇️ CSV indir",
-            csv,
+            csv.encode("utf-8"),
             "whooops_data.csv",
             mime="text/csv",
             use_container_width=True
@@ -346,6 +389,8 @@ else:
 
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("### Liste")
-        for r in rows:
-            st.write(r)
+        for _id, phone, cat, cnt, last_ts in rows:
+            score = min(100, cnt * 15)
+            st.markdown(badge(f"{score}/100 • {risk_label(score)}", risk_color(score)), unsafe_allow_html=True)
+            st.write(phone, "|", cat, "|", cnt, "|", last_ts or "-")
         st.markdown("</div>", unsafe_allow_html=True)
