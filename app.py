@@ -53,7 +53,6 @@ def normalize_phone(p: str) -> str:
         return ""
     if digits.startswith("0"):
         digits = digits[1:]
-    # TR odaklı basit normalize
     if len(digits) == 10:
         return "+90" + digits
     if digits.startswith("90"):
@@ -198,6 +197,17 @@ def badge(text: str, color: str) -> str:
     """
 
 
+# ================= ROUTING (Home click) =================
+def go_home(clear: bool = False):
+    st.session_state["active_tab"] = "🔍 Sorgula"
+    if clear:
+        st.session_state.pop("nid", None)
+        st.session_state.pop("phone_input", None)
+
+# init active tab
+if "active_tab" not in st.session_state:
+    st.session_state["active_tab"] = "🔍 Sorgula"
+
 # ================= PAGE =================
 st.set_page_config(page_title=APP_NAME, page_icon="🛡️", layout="centered")
 init_db()
@@ -206,10 +216,7 @@ init_db()
 st.markdown(
     """
     <style>
-    /* Streamlit üst header boşluğunu kaldır (çakışmayı bitirir) */
     header[data-testid="stHeader"] { display: none; }
-
-    /* içerik biraz aşağı insin */
     .block-container { padding-top: 1.8rem !important; max-width: 900px; }
 
     #MainMenu {visibility: hidden;}
@@ -223,59 +230,64 @@ st.markdown(
         border:1px solid rgba(255,255,255,0.08);
     }
 
-    /* input daha belirgin */
     .stTextInput input {
         border-radius: 14px !important;
         padding: 0.9rem 1rem !important;
         font-size: 1.05rem !important;
     }
-
     .stTextArea textarea {
         border-radius: 14px !important;
         padding: 0.8rem 1rem !important;
     }
+
+    /* Header button görünümü */
+    div[data-testid="column"] button[kind="secondary"] {
+        border-radius: 14px !important;
+        font-weight: 900 !important;
+        padding: 0.55rem 0.85rem !important;
+    }
+
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# ✅ Özel header (kalkan + isim)
-st.markdown(
-    f"""
-    <div style="
-        display:flex;
-        align-items:center;
-        gap:10px;
-        margin-bottom:6px;
-        margin-top:6px;
-    ">
-        <span style="font-size:34px;">🛡️</span>
-        <span style="
-            font-size:32px;
-            font-weight:900;
-            letter-spacing:-0.5px;
-        ">
-            {APP_NAME}
-        </span>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+# ✅ TIKLANABİLİR HEADER: WhoOops'a basınca ana ekrana dön
+colH1, colH2 = st.columns([6, 1])
+with colH1:
+    if st.button("🛡️  WhoOops", key="home_btn", type="secondary"):
+        go_home(clear=False)
+        st.rerun()
+with colH2:
+    if st.button("🏠", key="home_icon", help="Ana sayfaya dön"):
+        go_home(clear=False)
+        st.rerun()
+
 st.caption("Oops demeden önce kontrol et.")
 
-tab = st.radio("Menü", ["🔍 Sorgula", "📊 Admin"], horizontal=True, label_visibility="collapsed")
+# ✅ Tab seçimi (session_state ile kontrol)
+tab = st.radio(
+    "Menü",
+    ["🔍 Sorgula", "📊 Admin"],
+    horizontal=True,
+    label_visibility="collapsed",
+    index=0 if st.session_state["active_tab"] == "🔍 Sorgula" else 1,
+)
+
+# Tab değişince state güncelle
+st.session_state["active_tab"] = tab
 
 
 # ================= SORGULA =================
 if tab == "🔍 Sorgula":
     st.markdown("<div class='card'>", unsafe_allow_html=True)
 
-    # ✅ Aradaki “tıklanabilir bar” hissini bitirmek için label gizlendi
     st.markdown("### Telefon numarası")
     phone = st.text_input(
         "Telefon numarası",
         placeholder="0532... veya +90...",
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        key="phone_input"
     )
 
     col1, col2 = st.columns([1, 1])
@@ -289,6 +301,7 @@ if tab == "🔍 Sorgula":
     with col2:
         if st.button("Temizle", use_container_width=True):
             st.session_state.pop("nid", None)
+            st.session_state["phone_input"] = ""
             st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -374,7 +387,6 @@ else:
 
         rows = list_numbers()
 
-        # CSV (basit)
         csv = "phone,category,count,last_reported_at\n"
         for r in rows:
             csv += f"{r[1]},{r[2]},{r[3]},{(r[4] or '')}\n"
